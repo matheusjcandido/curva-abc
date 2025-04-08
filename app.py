@@ -437,7 +437,7 @@ with st.sidebar:
     st.markdown("---"); st.subheader("ℹ️ Sobre"); st.info("Gera Curvas ABC. v1.11"); st.markdown("---"); st.caption(f"© {datetime.now().year}")
 
 # Conteúdo Principal
-st.markdown('<div class="highlight">', unsafe_allow_html=True); st.markdown("#### Como usar:\n1. **Faça o upload da aba de planilha sintética **.\n2. **Confirme Colunas**.\n3. Ajuste **Limites**.\n4. Clique **Gerar**.\n5. **Analise/Baixe**."); st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('<div class="highlight">', unsafe_allow_html=True); st.markdown("#### Como usar:\n1. Faça o upload da aba de planilha sintética.\n2. **Confirme Colunas**.\n3. Ajuste **Limites**.\n4. Clique **Gerar**.\n5. **Analise/Baixe**."); st.markdown('</div>', unsafe_allow_html=True)
 
 # Upload
 uploaded_file = st.file_uploader("📂 Selecione a planilha", type=["csv", "xlsx", "xls"], key="file_uploader")
