@@ -11,6 +11,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import traceback # Para exibir detalhes do erro
+import math # Para truncamento (se necessário, mas vamos focar na formatação)
 
 # Configuração da página
 st.set_page_config(
@@ -78,7 +79,7 @@ def detectar_delimitador(sample_content):
     delimiters = [';', ',', '\t', '|']
     counts = {d: sample_content.count(d) for d in delimiters}
     # Prioriza ';' se a contagem for similar a ',', comum no Brasil
-    if counts[';'] > 0 and counts[';'] >= counts[','] * 0.8:
+    if counts.get(';', 0) > 0 and counts[';'] >= counts.get(',', 0) * 0.8:
          return ';'
     # Remove delimitadores com contagem zero antes de encontrar o máximo
     counts = {k: v for k, v in counts.items() if v > 0}
@@ -88,103 +89,87 @@ def detectar_delimitador(sample_content):
 
 def encontrar_linha_cabecalho(df_preview):
     """Encontra a linha que provavelmente contém os cabeçalhos."""
-    cabecalhos_possiveis = ['CÓDIGO', 'ITEM', 'DESCRIÇÃO', 'CUSTO', 'VALOR', 'TOTAL', 'PREÇO', 'SERVIÇO']
+    # Expandido para incluir mais termos comuns e os novos campos
+    cabecalhos_possiveis = [
+        'CÓDIGO', 'ITEM', 'DESCRIÇÃO', 'CUSTO', 'VALOR', 'TOTAL', 'PREÇO', 'SERVIÇO',
+        'UNID', 'UNIDADE', 'UM', 'QUANT', 'QTD', 'QUANTIDADE', 'UNITÁRIO', 'UNITARIO'
+    ]
     max_matches = 0
     header_row_index = 0
 
-    # Verifica as primeiras 20 linhas (ou menos se o df for menor)
     for i in range(min(20, len(df_preview))):
         try:
-            row_values = df_preview.iloc[i].astype(str).str.upper().tolist()
-            current_matches = sum(any(keyword in str(cell).upper() for keyword in cabecalhos_possiveis) for cell in row_values if pd.notna(cell))
+            # Pega valores não nulos da linha, converte para string e maiúsculas
+            row_values = df_preview.iloc[i].dropna().astype(str).str.upper().tolist()
+            # Conta quantas células na linha contêm alguma das palavras-chave
+            current_matches = sum(any(keyword in cell for keyword in cabecalhos_possiveis) for cell in row_values)
 
             # Considera a linha com mais palavras-chave como cabeçalho
+            # Adiciona um bônus se encontrar 'DESCRIÇÃO' ou 'CODIGO', que são mais prováveis
+            if 'DESCRIÇÃO' in row_values or 'CODIGO' in row_values or 'CÓDIGO' in row_values:
+                 current_matches += 2
+
             if current_matches > max_matches:
                 max_matches = current_matches
                 header_row_index = i
         except Exception:
-            # Ignora linhas que causem erro na verificação
-            continue
+            continue # Ignora linhas problemáticas
 
-    # Se nenhuma correspondência significativa for encontrada, assume 0
-    # mas só se a linha 0 tiver algum conteúdo útil
-    if max_matches < 2 and df_preview.iloc[0].isnull().all(): # Se poucas correspondências e linha 0 vazia
-         if len(df_preview) > 1 and not df_preview.iloc[1].isnull().all():
-              return 1 # Tenta a linha 1 se a 0 for vazia
-         else:
-              return 0 # Mantém 0 como último recurso
+    # Lógica de fallback (mantida)
+    if max_matches < 2 and df_preview.iloc[0].isnull().all():
+         if len(df_preview) > 1 and not df_preview.iloc[1].isnull().all(): return 1
+         else: return 0
     elif max_matches == 0:
-         return 0 # Assume 0 se nenhuma correspondência
+         return 0
 
     return header_row_index
 
 def sanitizar_dataframe(df):
     """Sanitiza o DataFrame para garantir compatibilidade com Streamlit/PyArrow."""
-    if df is None:
-        return None
-
+    if df is None: return None
     df_clean = df.copy()
-
-    # Garante que nomes das colunas sejam strings únicas e limpas
     new_columns = []
     seen_columns = {}
     for i, col in enumerate(df_clean.columns):
-        col_str = str(col).strip() if pd.notna(col) else f"coluna_{i}" # Nome padrão se for nulo
-        if col_str in seen_columns:
-            seen_columns[col_str] += 1
-            new_columns.append(f"{col_str}_{seen_columns[col_str]}")
-        else:
-            seen_columns[col_str] = 0
-            new_columns.append(col_str)
+        col_str = str(col).strip() if pd.notna(col) else f"coluna_{i}"
+        if not col_str: col_str = f"coluna_{i}" # Garante que não seja vazio
+        while col_str in seen_columns: # Renomeia duplicatas
+            seen_columns[col_str] = seen_columns.get(col_str, 0) + 1
+            col_str = f"{col_str.rsplit('_', 1)[0]}_{seen_columns[col_str]}" if '_' in col_str and col_str.rsplit('_', 1)[-1].isdigit() else f"{col_str}_1"
+        seen_columns[col_str] = 0
+        new_columns.append(col_str)
     df_clean.columns = new_columns
 
-    # Converte colunas com tipos mistos ou 'object' para string, tratando erros
     for col in df_clean.columns:
         try:
-            # Tenta detectar tipos mistos (exceto None/NaN)
-            non_na_types = df_clean[col].dropna().apply(type).unique()
-            if len(non_na_types) > 1:
-                 # Se misto, tenta converter para numérico se possível, senão string
-                 df_clean[col] = pd.to_numeric(df_clean[col], errors='ignore')
-                 if df_clean[col].dtype == 'object': # Se ainda for object após to_numeric
-                      df_clean[col] = df_clean[col].astype(str)
+            # Tenta converter para numérico primeiro (ignora erros, mantém object se falhar)
+            df_clean[col] = pd.to_numeric(df_clean[col], errors='ignore')
+            # Se não for numérico, tenta datetime (ignora erros)
+            if df_clean[col].dtype == 'object':
+                try:
+                    df_clean[col] = pd.to_datetime(df_clean[col], errors='ignore')
+                except Exception: # Captura exceções mais amplas de datetime
+                     pass
+            # Se ainda for 'object' ou se for tipo misto, converte para string
+            if df_clean[col].dtype == 'object' or df_clean[col].apply(type).nunique() > 1:
+                 # Verifica se a conversão para string é segura
+                 if df_clean[col].isnull().all() or df_clean[col].apply(lambda x: isinstance(x, (str, int, float, bool))).all():
+                      df_clean[col] = df_clean[col].astype(str).replace('nan', '', regex=False).replace('NaT', '', regex=False)
+                 # else: st.warning(f"Coluna {col} com tipos complexos não convertida para string.")
 
-            elif df_clean[col].dtype == 'object':
-                 # Tenta converter para numérico ou datetime se parecer apropriado
-                 df_clean[col] = pd.to_numeric(df_clean[col], errors='ignore')
-                 # Se ainda for object, tenta datetime
-                 if df_clean[col].dtype == 'object':
-                      try:
-                           # Tenta converter para datetime, mas volta se falhar muito
-                           original_col = df_clean[col].copy()
-                           df_clean[col] = pd.to_datetime(df_clean[col], errors='coerce')
-                           # Se mais de 50% falhou, reverte para string
-                           if df_clean[col].isna().sum() / len(df_clean[col]) > 0.5:
-                                df_clean[col] = original_col.astype(str)
-                      except Exception:
-                           df_clean[col] = df_clean[col].astype(str) # Último recurso: string
-                 # Se ainda for object após tentativas, converte para string
-                 if df_clean[col].dtype == 'object':
-                      df_clean[col] = df_clean[col].astype(str)
-
-            # Remove caracteres nulos de colunas string
-            if df_clean[col].dtype == 'string' or df_clean[col].dtype == 'object':
-                 # Verifica se a coluna realmente contém strings antes de usar .str
+            # Remove caracteres nulos se for string
+            if isinstance(df_clean[col].dtype, pd.StringDtype) or df_clean[col].dtype == 'object':
                  if df_clean[col].apply(lambda x: isinstance(x, str)).any():
-                      df_clean[col] = df_clean[col].astype(str).str.replace('\0', '', regex=False)
+                      df_clean[col] = df_clean[col].str.replace('\x00', '', regex=False)
 
         except Exception as e:
-            # Em caso de erro inesperado na sanitização da coluna, converte para string
-            # st.warning(f"Erro ao sanitizar coluna '{col}': {e}. Convertendo para string.")
-            try:
-                df_clean[col] = df_clean[col].astype(str)
-            except Exception:
-                 st.error(f"Falha crítica ao converter coluna '{col}' para string.")
-                 # Poderia remover a coluna ou parar, mas vamos deixar seguir por enquanto
+            # st.warning(f"Erro ao sanitizar coluna '{col}': {e}. Tentando converter para string.")
+            try: df_clean[col] = df_clean[col].astype(str)
+            except Exception: st.error(f"Falha crítica ao converter coluna '{col}' para string.")
 
-    # Remove linhas que são completamente nulas
-    df_clean = df_clean.dropna(how='all')
+    df_clean = df_clean.dropna(how='all').dropna(axis=1, how='all')
     return df_clean
+
 
 # --- Função Principal de Processamento ---
 
@@ -193,748 +178,650 @@ def processar_arquivo(uploaded_file):
     df = None
     delimitador = None
     linha_cabecalho = 0 # Default
-    encodings_to_try = ['utf-8', 'latin1', 'cp1252'] # ISO-8859-1 é similar a latin1
+    encodings_to_try = ['utf-8', 'latin1', 'cp1252']
 
     try:
         file_name = uploaded_file.name.lower()
-        file_content = uploaded_file.getvalue() # Ler bytes uma vez
+        file_content = uploaded_file.getvalue()
 
         # --- Processamento Excel ---
         if file_name.endswith(('.xlsx', '.xls')):
-            # 1. Ler preview para encontrar cabeçalho
             try:
+                # Tenta ler com openpyxl primeiro (mais novo)
                 df_preview = pd.read_excel(io.BytesIO(file_content), engine='openpyxl', nrows=25, header=None)
-                linha_cabecalho = encontrar_linha_cabecalho(df_preview)
-            except Exception as e:
-                st.warning(f"Não foi possível ler o preview do Excel para achar cabeçalho: {e}. Assumindo linha 0.")
-                linha_cabecalho = 0
+            except Exception:
+                # Se falhar, tenta com xlrd (mais antigo, pode precisar instalar)
+                try:
+                    st.warning("Falha ao ler com 'openpyxl', tentando com 'xlrd' (pode ser necessário instalar: pip install xlrd)")
+                    df_preview = pd.read_excel(io.BytesIO(file_content), engine='xlrd', nrows=25, header=None)
+                except Exception as e_xlrd:
+                    st.error(f"Erro ao ler preview do Excel com ambos os engines: {e_xlrd}")
+                    return None, None
 
-            # 2. Ler arquivo completo com o cabeçalho correto
-            df = pd.read_excel(io.BytesIO(file_content), engine='openpyxl', header=linha_cabecalho)
+            linha_cabecalho = encontrar_linha_cabecalho(df_preview)
+            # Ler arquivo completo com o cabeçalho correto e engine que funcionou
+            engine_to_use = 'openpyxl' if 'df_preview' in locals() and isinstance(df_preview, pd.DataFrame) else 'xlrd'
+            df = pd.read_excel(io.BytesIO(file_content), engine=engine_to_use, header=linha_cabecalho)
+
 
         # --- Processamento CSV ---
         elif file_name.endswith('.csv'):
             detected_encoding = None
             decoded_content = None
-
-            # 1. Tentar decodificar com diferentes encodings
             for enc in encodings_to_try:
                 try:
                     decoded_content = file_content.decode(enc)
                     detected_encoding = enc
-                    # st.info(f"Arquivo CSV decodificado com {enc}")
-                    break # Sai do loop se decodificar com sucesso
-                except UnicodeDecodeError:
-                    continue # Tenta o próximo encoding
+                    break
+                except UnicodeDecodeError: continue
             if decoded_content is None:
-                st.error("Erro de decodificação: Não foi possível ler o arquivo CSV com os encodings testados (UTF-8, Latin-1, CP1252). Verifique o encoding do arquivo.")
+                st.error("Erro de decodificação CSV. Verifique o encoding.")
                 return None, None
-
-            # Verificar se o conteúdo decodificado está vazio
             if not decoded_content.strip():
-                 st.error("O arquivo CSV enviado está vazio.")
+                 st.error("Arquivo CSV vazio.")
                  return None, None
 
-            # 2. Detectar delimitador a partir de uma amostra
-            sample_for_delimiter = decoded_content[:5000] # Usa os primeiros 5000 chars
+            sample_for_delimiter = decoded_content[:5000]
             delimitador = detectar_delimitador(sample_for_delimiter)
-            # st.info(f"Delimitador detectado: '{delimitador}'")
 
-            # 3. Ler preview para encontrar cabeçalho
             try:
-                df_preview = pd.read_csv(io.StringIO(decoded_content), delimiter=delimitador, nrows=25, header=None, skipinitialspace=True)
+                df_preview = pd.read_csv(io.StringIO(decoded_content), delimiter=delimitador, nrows=25, header=None, skipinitialspace=True, low_memory=False)
                 linha_cabecalho = encontrar_linha_cabecalho(df_preview)
-                # st.info(f"Linha de cabeçalho detectada: {linha_cabecalho}")
             except Exception as e:
-                st.warning(f"Não foi possível ler o preview do CSV para achar cabeçalho: {e}. Assumindo linha 0.")
+                st.warning(f"Erro ao ler preview do CSV: {e}. Assumindo linha 0.")
                 linha_cabecalho = 0
 
-            # 4. Ler arquivo completo com cabeçalho e delimitador corretos
             df = pd.read_csv(
-                io.StringIO(decoded_content),
-                delimiter=delimitador,
-                header=linha_cabecalho,
-                encoding=detected_encoding,
-                on_bad_lines='warn', # Avisa sobre linhas ruins mas tenta continuar
-                skipinitialspace=True, # Ignora espaços após o delimitador
-                low_memory=False # Ajuda com tipos mistos, mas usa mais memória
+                io.StringIO(decoded_content), delimiter=delimitador, header=linha_cabecalho,
+                encoding=detected_encoding, on_bad_lines='warn', skipinitialspace=True, low_memory=False
             )
 
         else:
-            st.error("Formato de arquivo não suportado. Use CSV, XLSX ou XLS.")
+            st.error("Formato de arquivo não suportado.")
             return None, None
 
         # --- Pós-processamento Comum ---
         if df is not None:
-            # Remover linhas e colunas totalmente vazias
             df = df.dropna(how='all').dropna(axis=1, how='all')
             if df.empty:
-                 st.error("O arquivo parece vazio após remover linhas/colunas nulas.")
+                 st.error("Arquivo vazio após remover linhas/colunas nulas.")
                  return None, delimitador
-
-            # Sanitizar o DataFrame para compatibilidade
             df = sanitizar_dataframe(df)
             if df is None or df.empty:
                  st.error("Falha na sanitização do DataFrame.")
                  return None, delimitador
-
             return df, delimitador
-
         else:
-             # Caso df não tenha sido atribuído (erro anterior)
              return None, delimitador
 
     except Exception as e:
         st.error(f"Erro fatal ao processar o arquivo: {str(e)}")
-        with st.expander("Detalhes técnicos do erro"):
-            st.text(traceback.format_exc())
+        with st.expander("Detalhes técnicos do erro"): st.text(traceback.format_exc())
         return None, None
 
 # --- Funções da Curva ABC (limpeza, identificação, geração) ---
 
 def limpar_valor(valor):
     """Limpa e converte valores monetários para float, tratando diversos formatos."""
-    if pd.isna(valor):
-        return 0.0
-
-    # Se já for numérico, retorna como float
-    if isinstance(valor, (int, float, np.number)):
-        return float(valor)
-
+    if pd.isna(valor): return 0.0
+    if isinstance(valor, (int, float, np.number)): return float(valor)
     valor_str = str(valor).strip()
-    if not valor_str:
-        return 0.0
-
-    # Remove símbolos de moeda comuns e espaços extras
+    if not valor_str: return 0.0
     valor_str = re.sub(r'[R$€£¥\s]', '', valor_str)
-
-    # Verifica se temos '.' e ',' para determinar o formato
     has_comma = ',' in valor_str
     has_dot = '.' in valor_str
-
     if has_comma and has_dot:
-        # Descobre qual é o último separador
         last_comma_pos = valor_str.rfind(',')
         last_dot_pos = valor_str.rfind('.')
-        # Se vírgula vem depois do ponto, assume formato BR/EU (1.234,56)
-        if last_comma_pos > last_dot_pos:
-            valor_str = valor_str.replace('.', '').replace(',', '.')
-        # Se ponto vem depois da vírgula, assume formato US (1,234.56)
-        else:
-            valor_str = valor_str.replace(',', '')
-    elif has_comma:
-        # Apenas vírgula, assume como separador decimal (1234,56)
-        valor_str = valor_str.replace(',', '.')
-    # Se tem apenas ponto ou nenhum separador, já deve estar no formato correto (1234.56 ou 1234)
-
-    # Remove qualquer caractere não numérico restante (exceto o ponto decimal)
+        if last_comma_pos > last_dot_pos: valor_str = valor_str.replace('.', '').replace(',', '.')
+        else: valor_str = valor_str.replace(',', '')
+    elif has_comma: valor_str = valor_str.replace(',', '.')
     valor_str = re.sub(r'[^\d.]', '', valor_str)
+    try: return float(valor_str) if valor_str else 0.0
+    except ValueError: return 0.0
 
-    try:
-        return float(valor_str) if valor_str else 0.0
-    except ValueError:
-        # st.warning(f"Não foi possível converter '{valor}' para número.")
-        return 0.0
+# Função para limpar quantidade (similar a valor, mas sem R$)
+def limpar_quantidade(qtd):
+    """Limpa e converte valores de quantidade para float."""
+    if pd.isna(qtd): return 0.0
+    if isinstance(qtd, (int, float, np.number)): return float(qtd)
+    qtd_str = str(qtd).strip()
+    if not qtd_str: return 0.0
+    # Remove espaços, mas mantém . e ,
+    qtd_str = re.sub(r'[\s]', '', qtd_str)
+    # Lógica de separador decimal (igual a limpar_valor)
+    has_comma = ',' in qtd_str
+    has_dot = '.' in qtd_str
+    if has_comma and has_dot:
+        last_comma_pos = qtd_str.rfind(',')
+        last_dot_pos = qtd_str.rfind('.')
+        if last_comma_pos > last_dot_pos: qtd_str = qtd_str.replace('.', '').replace(',', '.')
+        else: qtd_str = qtd_str.replace(',', '')
+    elif has_comma: qtd_str = qtd_str.replace(',', '.')
+    qtd_str = re.sub(r'[^\d.]', '', qtd_str) # Remove não numéricos exceto ponto
+    try: return float(qtd_str) if qtd_str else 0.0
+    except ValueError: return 0.0
+
 
 def identificar_colunas(df):
-    """Identifica heuristicamente as colunas de código, descrição e valor."""
+    """Identifica heuristicamente as colunas de código, descrição, valor e as novas colunas."""
     coluna_codigo = None
     coluna_descricao = None
     coluna_valor = None
+    coluna_unidade = None # Novo
+    coluna_quantidade = None # Novo
+    coluna_custo_unitario = None # Novo
 
-    # Prioridade para nomes exatos comuns
+    # Prioridade para nomes exatos comuns (adicionando novos)
     exact_matches = {
         'codigo': ['código', 'codigo', 'cod.', 'item', 'ref', 'referencia', 'referência'],
         'descricao': ['descrição', 'descricao', 'desc', 'especificação', 'especificacao', 'serviço', 'servico'],
-        'valor': ['valor total', 'custo total', 'preço total', 'total', 'valor', 'custo', 'preço']
+        'valor': ['valor total', 'custo total', 'preço total', 'total', 'valor', 'custo', 'preço'],
+        'unidade': ['unid', 'unidade', 'und', 'um'],
+        'quantidade': ['quantidade', 'quant', 'qtd', 'qtde'],
+        'custo_unitario': ['custo unitário', 'custo unitario', 'preço unitário', 'preco unitario', 'valor unitário', 'valor unitario', 'unitário', 'unitario']
     }
 
     cols_lower = {str(col).lower().strip(): col for col in df.columns}
+    identified_cols = {} # Guarda as colunas já identificadas para não reatribuir
 
     # 1. Busca por nomes exatos
     for target, patterns in exact_matches.items():
+        current_col_var = locals().get(f'coluna_{target}') # Pega a variável correspondente (coluna_codigo, etc.)
+        if current_col_var is not None: continue # Pula se já identificou
+
         for pattern in patterns:
             if pattern in cols_lower:
                 col_original = cols_lower[pattern]
-                if target == 'codigo' and coluna_codigo is None:
-                    coluna_codigo = col_original
-                elif target == 'descricao' and coluna_descricao is None:
-                    coluna_descricao = col_original
-                elif target == 'valor' and coluna_valor is None:
-                     # Verifica se a coluna de valor parece numérica
-                     if pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].astype(str).str.contains(r'[\d,.]').any():
-                          coluna_valor = col_original
-                # Remove a coluna encontrada para evitar re-identificação
-                # del cols_lower[pattern] # Cuidado ao modificar dict durante iteração, melhor só checar se já achou
-                break # Vai para o próximo target (codigo, descricao, valor)
+                if col_original not in identified_cols.values(): # Verifica se essa coluna original já foi usada
+                    # Verificação adicional para valor/custo_unitario/quantidade (devem parecer numéricos)
+                    is_numeric_like = False
+                    if target in ['valor', 'custo_unitario', 'quantidade']:
+                         try: is_numeric_like = pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
+                         except Exception: pass # Ignora erro na verificação
+                    else: # Para código, descrição, unidade, não precisa ser numérico
+                         is_numeric_like = True
 
-    # 2. Busca por padrões parciais se não encontrou por nome exato
-    partial_patterns = {
-        'codigo': ['cod', 'item', 'ref'],
-        'descricao': ['desc', 'especif', 'serv'],
-        'valor': ['total', 'valor', 'custo', 'preço']
-    }
-    remaining_cols = {k: v for k, v in cols_lower.items() if v not in [coluna_codigo, coluna_descricao, coluna_valor]}
+                    if is_numeric_like:
+                        identified_cols[target] = col_original
+                        # Atualiza a variável local dinamicamente (cuidado com escopo, mas ok aqui)
+                        globals()[f'coluna_{target}'] = col_original
+                        break # Vai para o próximo target
 
-    for target, patterns in partial_patterns.items():
-        if (target == 'codigo' and coluna_codigo) or \
-           (target == 'descricao' and coluna_descricao) or \
-           (target == 'valor' and coluna_valor):
-            continue # Já encontrou essa coluna
+    # 2. Busca por padrões parciais se não encontrou por nome exato (simplificado)
+    # (Opcional: pode adicionar lógica parcial aqui se necessário, mas nomes exatos costumam bastar)
 
-        for col_lower, col_original in remaining_cols.items():
-             if any(p in col_lower for p in patterns):
-                  if target == 'codigo':
-                       coluna_codigo = col_original
-                       break
-                  elif target == 'descricao':
-                       coluna_descricao = col_original
-                       break
-                  elif target == 'valor':
-                       if pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].astype(str).str.contains(r'[\d,.]').any():
-                            coluna_valor = col_original
-                            break # Para de procurar valor se achar um candidato
+    # 3. Heurísticas baseadas em conteúdo (mantidas para descrição e valor como fallback)
+    available_cols = [c for c in df.columns if c not in identified_cols.values()]
 
-    # 3. Heurísticas baseadas em conteúdo (último recurso)
-    available_cols = list(df.columns)
-    potential_desc_cols = [c for c in available_cols if c not in [coluna_codigo, coluna_valor]]
-    potential_val_cols = [c for c in available_cols if c not in [coluna_codigo, coluna_descricao]]
-
-    if not coluna_descricao and potential_desc_cols:
-         # Coluna com strings mais longas é provavelmente descrição
+    if 'descricao' not in identified_cols and available_cols:
          try:
-              mean_lengths = {col: df[col].astype(str).str.len().mean() for col in potential_desc_cols}
-              if mean_lengths:
-                   coluna_descricao = max(mean_lengths, key=mean_lengths.get)
-         except Exception: pass # Ignora erro se cálculo de média falhar
+              mean_lengths = {col: df[col].astype(str).str.len().mean() for col in available_cols}
+              if mean_lengths: identified_cols['descricao'] = max(mean_lengths, key=mean_lengths.get)
+         except Exception: pass
 
-    if not coluna_valor and potential_val_cols:
-         # Coluna com maior soma de valores numéricos é provavelmente valor
+    if 'valor' not in identified_cols and available_cols:
          max_sum = -1
          best_val_col = None
+         potential_val_cols = [c for c in available_cols if c != identified_cols.get('descricao')]
          for col in potential_val_cols:
               try:
                    numeric_vals = df[col].apply(limpar_valor)
                    current_sum = numeric_vals.sum()
-                   # Verifica se a coluna tem valores significativos e é predominantemente numérica
-                   if current_sum > max_sum and numeric_vals.count() > len(df)*0.5: # Pelo menos 50% de valores numéricos
+                   if current_sum > max_sum and numeric_vals.count() > len(df)*0.5:
                         max_sum = current_sum
                         best_val_col = col
               except Exception: continue
-         if best_val_col:
-              coluna_valor = best_val_col
+         if best_val_col: identified_cols['valor'] = best_val_col
 
-    # Garante que as colunas sejam diferentes
-    if coluna_codigo == coluna_descricao or coluna_codigo == coluna_valor: coluna_codigo = None
-    if coluna_descricao == coluna_valor: coluna_descricao = None
-    # Tenta re-identificar se houver conflito (simplificado: apenas anula)
+    # Retorna as colunas encontradas (pode ser None se não achou)
+    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'),
+            identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
 
-    return coluna_codigo, coluna_descricao, coluna_valor
 
-def gerar_curva_abc(df, coluna_codigo, coluna_descricao, coluna_valor, limite_a=80, limite_b=95):
-    """Gera a curva ABC a partir do DataFrame processado."""
+def gerar_curva_abc(df, coluna_codigo, coluna_descricao, coluna_valor,
+                    coluna_unidade=None, coluna_quantidade=None, coluna_custo_unitario=None, # Novas colunas opcionais
+                    limite_a=80, limite_b=95):
+    """Gera a curva ABC a partir do DataFrame processado, incluindo novas colunas."""
+
+    # Validação das colunas essenciais
     if not all([coluna_codigo, coluna_descricao, coluna_valor]):
-        st.error("Erro interno: Uma ou mais colunas essenciais não foram identificadas.")
+        st.error("Erro interno: Colunas essenciais (Código, Descrição, Valor) não foram fornecidas.")
         return None, 0
-    if coluna_codigo not in df.columns or coluna_descricao not in df.columns or coluna_valor not in df.columns:
-         st.error(f"Erro interno: Colunas selecionadas ({coluna_codigo}, {coluna_descricao}, {coluna_valor}) não encontradas no DataFrame processado.")
+    essential_cols = [coluna_codigo, coluna_descricao, coluna_valor]
+    if not all(col in df.columns for col in essential_cols):
+         missing = [col for col in essential_cols if col not in df.columns]
+         st.error(f"Erro interno: Colunas essenciais não encontradas no DataFrame: {missing}")
          return None, 0
+
+    # Lista de colunas a serem usadas (inclui opcionais se existirem no DF)
+    cols_to_use = essential_cols
+    optional_cols_map = { # Mapeia nome do parâmetro para nome da coluna no DF
+        'unidade': coluna_unidade,
+        'quantidade': coluna_quantidade,
+        'custo_unitario': coluna_custo_unitario
+    }
+    valid_optional_cols = {}
+    for key, col_name in optional_cols_map.items():
+        if col_name and col_name in df.columns:
+            cols_to_use.append(col_name)
+            valid_optional_cols[key] = col_name # Guarda as opcionais válidas
 
     try:
         # Seleciona e copia as colunas relevantes
-        df_work = df[[coluna_codigo, coluna_descricao, coluna_valor]].copy()
+        df_work = df[list(set(cols_to_use))].copy() # Usa set para evitar duplicatas
 
-        # Limpa e converte a coluna de valor
+        # --- Limpeza e Conversão ---
         df_work['valor_numerico'] = df_work[coluna_valor].apply(limpar_valor)
-
-        # Converte código para string e remove espaços
         df_work['codigo_str'] = df_work[coluna_codigo].astype(str).str.strip()
         df_work['descricao_str'] = df_work[coluna_descricao].astype(str).str.strip()
+        # Limpa opcionais se existirem
+        if 'unidade' in valid_optional_cols:
+            df_work['unidade_str'] = df_work[valid_optional_cols['unidade']].astype(str).str.strip()
+        if 'quantidade' in valid_optional_cols:
+            df_work['quantidade_num'] = df_work[valid_optional_cols['quantidade']].apply(limpar_quantidade)
+        if 'custo_unitario' in valid_optional_cols:
+            df_work['custo_unitario_num'] = df_work[valid_optional_cols['custo_unitario']].apply(limpar_valor)
 
-
-        # Filtra itens com valor zero ou negativo e código inválido (opcional, mas bom)
+        # Filtra itens com valor zero ou negativo e código inválido
         df_work = df_work[(df_work['valor_numerico'] > 0) & (df_work['codigo_str'] != '')]
-
         if df_work.empty:
             st.error("Nenhum item com valor positivo e código válido encontrado após limpeza.")
             return None, 0
 
-        # Agrupa por código, somando valores e pegando a primeira descrição
-        df_agrupado = df_work.groupby('codigo_str').agg(
-            descricao=('descricao_str', 'first'),
-            valor=('valor_numerico', 'sum')
-        ).reset_index() # Converte o índice (codigo_str) de volta para coluna
+        # --- Agrupamento ---
+        agg_dict = {
+            'descricao': ('descricao_str', 'first'),
+            'valor': ('valor_numerico', 'sum') # Valor total é sempre somado
+        }
+        # Adiciona agregação para colunas opcionais (usando 'first')
+        if 'unidade' in valid_optional_cols: agg_dict['unidade'] = ('unidade_str', 'first')
+        # Para quantidade e custo unitário, 'first' é apropriado para planilha sintética
+        if 'quantidade' in valid_optional_cols: agg_dict['quantidade'] = ('quantidade_num', 'first')
+        if 'custo_unitario' in valid_optional_cols: agg_dict['custo_unitario'] = ('custo_unitario_num', 'first')
 
-        # Renomeia a coluna de código agrupado
+        df_agrupado = df_work.groupby('codigo_str').agg(**agg_dict).reset_index()
         df_agrupado = df_agrupado.rename(columns={'codigo_str': 'codigo'})
 
-        # Calcula valor total
-        valor_total = df_agrupado['valor'].sum()
-        if valor_total == 0:
-            st.error("Valor total dos itens é zero. Não é possível gerar a curva.")
+        # --- Cálculo da Curva ABC ---
+        valor_total_geral = df_agrupado['valor'].sum()
+        if valor_total_geral == 0:
+            st.error("Valor total dos itens é zero.")
             return None, 0
 
-        # Ordenar por valor
         df_curva = df_agrupado.sort_values('valor', ascending=False).reset_index(drop=True)
 
         # Adicionar colunas de percentual e classificação
-        df_curva['percentual'] = (df_curva['valor'] / valor_total * 100)
+        df_curva['percentual'] = (df_curva['valor'] / valor_total_geral * 100)
         df_curva['percentual_acumulado'] = df_curva['percentual'].cumsum()
+        df_curva['custo_total_acumulado'] = df_curva['valor'].cumsum() # Custo acumulado
 
         def classificar(perc_acum):
-            if perc_acum <= limite_a: return 'A'
-            elif perc_acum <= limite_b: return 'B'
+            # Adiciona pequena tolerância para evitar problemas de ponto flutuante no limite
+            if perc_acum <= limite_a + 1e-9: return 'A'
+            elif perc_acum <= limite_b + 1e-9: return 'B'
             else: return 'C'
         df_curva['classificacao'] = df_curva['percentual_acumulado'].apply(classificar)
 
         # Adicionar posição
         df_curva.insert(0, 'posicao', range(1, len(df_curva) + 1))
 
-        # Selecionar e reordenar colunas finais
-        df_final = df_curva[['posicao', 'codigo', 'descricao', 'valor', 'percentual', 'percentual_acumulado', 'classificacao']]
+        # --- Montar DataFrame Final ---
+        # Define a ordem desejada das colunas
+        col_order = ['posicao', 'codigo', 'descricao']
+        if 'unidade' in valid_optional_cols: col_order.append('unidade')
+        if 'quantidade' in valid_optional_cols: col_order.append('quantidade')
+        if 'custo_unitario' in valid_optional_cols: col_order.append('custo_unitario')
+        col_order.extend(['valor', 'custo_total_acumulado', 'percentual_acumulado', 'classificacao'])
+        # Adiciona 'percentual' se quiser
+        # col_order.append('percentual')
 
-        return df_final, valor_total
+        # Seleciona e reordena, preenchendo com NaN se alguma opcional não existia
+        df_final = df_curva.reindex(columns=col_order)
+
+        return df_final, valor_total_geral
 
     except Exception as e:
         st.error(f"Erro ao gerar a curva ABC: {str(e)}")
-        with st.expander("Detalhes técnicos do erro"):
-            st.text(traceback.format_exc())
+        with st.expander("Detalhes técnicos do erro"): st.text(traceback.format_exc())
         return None, 0
 
 # --- Funções de Visualização e Download ---
 
-def criar_graficos_plotly(df_curva, valor_total):
+def criar_graficos_plotly(df_curva, valor_total, limite_a, limite_b): # Passa limites
     """Cria gráficos interativos usando Plotly."""
-    if df_curva is None or df_curva.empty:
-        return None
-
+    # (Função mantida como na versão anterior, pois os gráficos principais não mudam)
+    # (Poderia adicionar gráficos baseados nas novas colunas se desejado)
+    if df_curva is None or df_curva.empty: return None
     try:
         fig = make_subplots(
             rows=2, cols=2,
-            subplot_titles=("Diagrama de Pareto (Itens x Valor Acumulado)",
-                            "Distribuição por Valor (%)",
-                            "Distribuição por Quantidade de Itens (%)",
-                            "Top 10 Itens por Valor"),
-            specs=[
-                [{"secondary_y": True}, {"type": "pie"}], # Pareto com eixo Y secundário
-                [{"type": "pie"}, {"type": "bar"}]
-            ],
-            vertical_spacing=0.15, # Aumenta espaço vertical
-            horizontal_spacing=0.1
+            subplot_titles=("Diagrama de Pareto (Itens x Valor Acumulado)", "Distribuição por Valor (%)",
+                            "Distribuição por Quantidade de Itens (%)", "Top 10 Itens por Valor"),
+            specs=[[{"secondary_y": True}, {"type": "pie"}], [{"type": "pie"}, {"type": "bar"}]],
+            vertical_spacing=0.15, horizontal_spacing=0.1
         )
-
-        # Cores padrão para as classes
-        colors = {'A': '#2ca02c', 'B': '#ff7f0e', 'C': '#d62728'} # Verde, Laranja, Vermelho
-
-        # --- Gráfico 1: Pareto ---
-        fig.add_trace(
-            go.Bar(
-                x=df_curva['posicao'],
-                y=df_curva['valor'], # Usar valor absoluto na barra
-                name='Valor do Item',
-                marker_color=df_curva['classificacao'].map(colors),
-                text=df_curva['codigo'], # Mostrar código no hover da barra
-                hoverinfo='x+y+text+name'
-            ),
-            secondary_y=False, row=1, col=1
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df_curva['posicao'],
-                y=df_curva['percentual_acumulado'],
-                name='Percentual Acumulado',
-                mode='lines+markers',
-                line=dict(color='#1f77b4', width=2), # Azul para linha acumulada
-                marker=dict(size=4)
-            ),
-            secondary_y=True, row=1, col=1
-        )
-        # Linhas de referência A e B
+        colors = {'A': '#2ca02c', 'B': '#ff7f0e', 'C': '#d62728'}
+        # Pareto
+        fig.add_trace(go.Bar(x=df_curva['posicao'], y=df_curva['valor'], name='Valor Item',
+                           marker_color=df_curva['classificacao'].map(colors), text=df_curva['codigo'],
+                           hoverinfo='x+y+text+name'), secondary_y=False, row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_curva['posicao'], y=df_curva['percentual_acumulado'], name='Perc. Acumulado',
+                               mode='lines+markers', line=dict(color='#1f77b4', width=2), marker=dict(size=4)),
+                      secondary_y=True, row=1, col=1)
         fig.add_hline(y=limite_a, line_dash="dash", line_color="grey", annotation_text=f"Classe A ({limite_a}%)", secondary_y=True, row=1, col=1)
         fig.add_hline(y=limite_b, line_dash="dash", line_color="grey", annotation_text=f"Classe B ({limite_b}%)", secondary_y=True, row=1, col=1)
-
-        # --- Gráfico 2: Pizza por Valor ---
+        # Pizza Valor
         valor_por_classe = df_curva.groupby('classificacao')['valor'].sum().reindex(['A', 'B', 'C']).fillna(0)
-        fig.add_trace(
-            go.Pie(
-                labels=valor_por_classe.index,
-                values=valor_por_classe.values,
-                name='Valor',
-                marker_colors=[colors[c] for c in valor_por_classe.index],
-                hole=0.4,
-                pull=[0.05 if c == 'A' else 0 for c in valor_por_classe.index], # Destaca A
-                textinfo='percent+label',
-                hoverinfo='label+percent+value+name'
-            ),
-            row=1, col=2
-        )
-
-        # --- Gráfico 3: Pizza por Quantidade ---
+        fig.add_trace(go.Pie(labels=valor_por_classe.index, values=valor_por_classe.values, name='Valor',
+                           marker_colors=[colors.get(c, '#888') for c in valor_por_classe.index], hole=0.4, pull=[0.05 if c == 'A' else 0 for c in valor_por_classe.index],
+                           textinfo='percent+label', hoverinfo='label+percent+value+name'), row=1, col=2)
+        # Pizza Quantidade
         qtd_por_classe = df_curva['classificacao'].value_counts().reindex(['A', 'B', 'C']).fillna(0)
-        fig.add_trace(
-            go.Pie(
-                labels=qtd_por_classe.index,
-                values=qtd_por_classe.values,
-                name='Quantidade',
-                marker_colors=[colors[c] for c in qtd_por_classe.index],
-                hole=0.4,
-                pull=[0.05 if c == 'A' else 0 for c in qtd_por_classe.index], # Destaca A
-                textinfo='percent+label',
-                hoverinfo='label+percent+value+name'
-            ),
-            row=2, col=1
-        )
-
-        # --- Gráfico 4: Top 10 Itens ---
-        top10 = df_curva.head(10).sort_values('valor', ascending=True) # Ordena para gráfico hbar
-        fig.add_trace(
-            go.Bar(
-                y=top10['codigo'] + ' (' + top10['descricao'].str[:30] + '...)', # Combina código e descrição no eixo Y
-                x=top10['valor'],
-                name='Top 10 Valor',
-                orientation='h',
-                marker_color=top10['classificacao'].map(colors),
-                text=top10['valor'].map('R$ {:,.2f}'.format), # Formata valor como texto
-                textposition='outside', # Coloca texto fora da barra
-                hoverinfo='y+x+name'
-            ),
-            row=2, col=2
-        )
-
-        # --- Layout Geral ---
-        fig.update_layout(
-            height=850, # Aumenta altura
-            showlegend=False,
-            title_text="Análise Gráfica da Curva ABC",
-            title_x=0.5,
-            title_font_size=22,
-            margin=dict(l=20, r=20, t=80, b=20), # Ajusta margens
-            paper_bgcolor='rgba(0,0,0,0)', # Fundo transparente
-            plot_bgcolor='rgba(0,0,0,0)'  # Fundo transparente
-        )
-
-        # Layout Eixos Pareto
+        fig.add_trace(go.Pie(labels=qtd_por_classe.index, values=qtd_por_classe.values, name='Quantidade',
+                           marker_colors=[colors.get(c, '#888') for c in qtd_por_classe.index], hole=0.4, pull=[0.05 if c == 'A' else 0 for c in qtd_por_classe.index],
+                           textinfo='percent+label', hoverinfo='label+percent+value+name'), row=2, col=1)
+        # Top 10
+        top10 = df_curva.head(10).sort_values('valor', ascending=True)
+        fig.add_trace(go.Bar(y=top10['codigo'] + ' (' + top10['descricao'].str[:30] + '...)', x=top10['valor'], name='Top 10 Valor',
+                           orientation='h', marker_color=top10['classificacao'].map(colors), text=top10['valor'].map('R$ {:,.2f}'.format),
+                           textposition='outside', hoverinfo='y+x+name'), row=2, col=2)
+        # Layout
+        fig.update_layout(height=850, showlegend=False, title_text="Análise Gráfica da Curva ABC", title_x=0.5, title_font_size=22,
+                          margin=dict(l=20, r=20, t=80, b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         fig.update_yaxes(title_text="Valor do Item (R$)", secondary_y=False, row=1, col=1)
         fig.update_yaxes(title_text="Percentual Acumulado (%)", secondary_y=True, row=1, col=1, range=[0, 101])
-        fig.update_xaxes(title_text="Posição do Item (Ordenado por Valor)", row=1, col=1)
-
-        # Layout Eixo Top 10
+        fig.update_xaxes(title_text="Posição do Item", row=1, col=1)
         fig.update_xaxes(title_text="Valor (R$)", row=2, col=2)
-        fig.update_yaxes(title_text="Item (Código + Descrição)", autorange="reversed", row=2, col=2, tickfont_size=10)
-
-        # Atualiza títulos dos subplots para clareza
-        fig.layout.annotations[0].update(text="<b>Diagrama de Pareto</b> (Valor x Acumulado %)")
-        fig.layout.annotations[1].update(text="<b>Distribuição do Valor Total (%)</b> por Classe")
-        fig.layout.annotations[2].update(text="<b>Distribuição da Quantidade de Itens (%)</b> por Classe")
-        fig.layout.annotations[3].update(text="<b>Top 10 Itens</b> por Valor")
-
+        fig.update_yaxes(title_text="Item", autorange="reversed", row=2, col=2, tickfont_size=10)
+        fig.layout.annotations[0].update(text="<b>Diagrama de Pareto</b>")
+        fig.layout.annotations[1].update(text="<b>Distribuição Valor (%)</b>")
+        fig.layout.annotations[2].update(text="<b>Distribuição Quantidade (%)</b>")
+        fig.layout.annotations[3].update(text="<b>Top 10 Itens (Valor)</b>")
         return fig
-
     except Exception as e:
         st.error(f"Erro ao criar gráficos: {str(e)}")
-        with st.expander("Detalhes técnicos do erro"):
-            st.text(traceback.format_exc())
+        with st.expander("Detalhes técnicos do erro"): st.text(traceback.format_exc())
         return None
 
 def get_download_link(df, filename, text, file_format='csv'):
-    """Gera um link para download do DataFrame como CSV ou Excel."""
+    """Gera um botão de download para o DataFrame como CSV ou Excel."""
     try:
+        # Prepara o DataFrame para download (nomes amigáveis e formatação se Excel)
+        df_download = df.copy()
+        # Renomeia colunas para o arquivo baixado
+        rename_map = {
+            'posicao': 'Posição', 'codigo': 'Código', 'descricao': 'Descrição',
+            'unidade': 'Unidade', 'quantidade': 'Quantidade', 'custo_unitario': 'Custo Unitário (R$)',
+            'valor': 'Custo Total (R$)', 'custo_total_acumulado': 'Custo Total Acumulado (R$)',
+            'percentual': 'Percentual (%)', 'percentual_acumulado': 'Percentual Acumulado (%)',
+            'classificacao': 'Classificação'
+        }
+        df_download.rename(columns=rename_map, inplace=True)
+        # Seleciona apenas colunas que realmente existem após renomear
+        df_download = df_download[[col for col in rename_map.values() if col in df_download.columns]]
+
         if file_format == 'csv':
-            data = df.to_csv(index=False, sep=';', decimal=',', encoding='utf-8-sig') # utf-8-sig para Excel ler BOM
+            # Usa utf-8-sig para BOM, ajudando Excel a reconhecer UTF-8
+            data = df_download.to_csv(index=False, sep=';', decimal=',', encoding='utf-8-sig')
             mime = 'text/csv'
-            href_data = f'data:{mime};base64,{base64.b64encode(data.encode("utf-8-sig")).decode()}'
         elif file_format == 'excel':
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df.to_excel(writer, sheet_name='Curva ABC', index=False)
-                # Formatação (opcional, pode ser removida se causar lentidão/erros)
+                df_download.to_excel(writer, sheet_name='Curva ABC', index=False)
                 workbook = writer.book
                 worksheet = writer.sheets['Curva ABC']
+                # Formatos (simplificado para evitar erros complexos)
                 header_format = workbook.add_format({'bold': True, 'bg_color': '#1e3c72', 'color': 'white', 'align': 'center', 'valign': 'vcenter', 'border': 1})
                 currency_format = workbook.add_format({'num_format': 'R$ #,##0.00', 'border': 1})
-                percent_format = workbook.add_format({'num_format': '0.00%', 'border': 1})
+                percent_format = workbook.add_format({'num_format': '0.00"%"', 'border': 1}) # Formato percentual
+                number_format = workbook.add_format({'num_format': '#,##0.00', 'border': 1}) # Formato número geral
                 center_format = workbook.add_format({'align': 'center', 'border': 1})
 
-                # Aplicar formato de cabeçalho
-                for col_num, value in enumerate(df.columns.values):
-                     worksheet.write(0, col_num, value, header_format)
+                # Aplica formato de cabeçalho
+                for col_num, value in enumerate(df_download.columns.values):
+                    worksheet.write(0, col_num, value, header_format)
 
-                # Aplicar formatos às colunas (ajuste os nomes das colunas conforme necessário)
-                col_map = {name: i for i, name in enumerate(df.columns)}
-                if 'Valor (R$)' in col_map: worksheet.set_column(col_map['Valor (R$)'], col_map['Valor (R$)'], 15, currency_format)
-                if 'Percentual (%)' in col_map: worksheet.set_column(col_map['Percentual (%)'], col_map['Percentual (%)'], 12, percent_format)
-                if 'Percentual Acumulado (%)' in col_map: worksheet.set_column(col_map['Percentual Acumulado (%)'], col_map['Percentual Acumulado (%)'], 15, percent_format)
-                if 'Classificação' in col_map: worksheet.set_column(col_map['Classificação'], col_map['Classificação'], 12, center_format)
-                if 'Posição' in col_map: worksheet.set_column(col_map['Posição'], col_map['Posição'], 8, center_format)
+                # Aplica formatos às colunas baseado no nome *final*
+                col_map = {name: i for i, name in enumerate(df_download.columns)}
+                currency_cols = ['Custo Unitário (R$)', 'Custo Total (R$)', 'Custo Total Acumulado (R$)']
+                percent_cols = ['Percentual (%)', 'Percentual Acumulado (%)']
+                number_cols = ['Quantidade']
+                center_cols = ['Posição', 'Classificação']
 
-                # Ajustar largura das outras colunas
-                for col_name in ['Código', 'Descrição']:
-                     if col_name in col_map:
-                          col_idx = col_map[col_name]
-                          width = max(df[col_name].astype(str).map(len).max(), len(col_name)) + 2
-                          worksheet.set_column(col_idx, col_idx, min(width, 60)) # Limita largura máxima
+                for col_name in df_download.columns:
+                     col_idx = col_map[col_name]
+                     if col_name in currency_cols: fmt = currency_format
+                     elif col_name in percent_cols: fmt = percent_format
+                     elif col_name in number_cols: fmt = number_format
+                     elif col_name in center_cols: fmt = center_format
+                     else: fmt = None # Formato padrão
+
+                     # Ajusta largura da coluna
+                     try: width = max(df_download[col_name].astype(str).map(len).max(), len(col_name)) + 2
+                     except: width = len(col_name) + 5 # Fallback
+                     worksheet.set_column(col_idx, col_idx, min(width, 50), fmt) # Aplica formato e largura
 
             output.seek(0)
             data = output.read()
             mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            href_data = f'data:{mime};base64,{base64.b64encode(data).decode()}'
         else:
-            return "Formato inválido"
+            st.error("Formato de download inválido.")
+            return
 
-        # Usa st.download_button para melhor compatibilidade
+        # Cria o botão de download
         st.download_button(
             label=text,
             data=data,
             file_name=filename,
             mime=mime,
+            key=f"download_{file_format}" # Chave única para o botão
         )
-        return "" # Retorna string vazia pois o botão é criado diretamente
 
     except Exception as e:
         st.error(f"Erro ao gerar link de download ({file_format}): {e}")
-        return f"<i>Erro ao gerar link ({file_format})</i>"
-
+        # Não retorna HTML aqui, apenas loga o erro
 
 # --- Interface Streamlit ---
 
-# Sidebar
+# Sidebar (mantida)
 with st.sidebar:
-    st.image("https://via.placeholder.com/150x50.png?text=Logo+Empresa", use_column_width=True) # Placeholder para logo
+    # st.image("logo.png", use_column_width=True) # Comente ou substitua pelo seu logo
     st.header("⚙️ Configurações")
     st.subheader("Parâmetros da Curva ABC")
-    # Usar session_state para manter os valores dos sliders entre reruns
     if 'limite_a' not in st.session_state: st.session_state.limite_a = 80
     if 'limite_b' not in st.session_state: st.session_state.limite_b = 95
-
     limite_a = st.slider("Limite Classe A (%)", 50, 95, st.session_state.limite_a, 1, key='limite_a_slider')
-    # Garante que limite B seja maior que A
     limite_b_min = limite_a + 1
     limite_b = st.slider("Limite Classe B (%)", limite_b_min, 99, max(st.session_state.limite_b, limite_b_min), 1, key='limite_b_slider')
-
-    # Atualiza session_state se os sliders mudarem
     st.session_state.limite_a = limite_a
     st.session_state.limite_b = limite_b
-
     st.markdown("---")
     st.subheader("ℹ️ Sobre")
     st.info("""
-    Aplicativo para gerar Curvas ABC a partir de planilhas sintéticas (SINAPI ou outras).
-    **Funcionalidades:**
-    - Upload de CSV/Excel.
-    - Detecção automática de cabeçalho e colunas.
-    - Limpeza de dados e agrupamento.
-    - Visualizações interativas.
-    - Exportação em CSV e Excel.
+    Gera Curvas ABC de planilhas sintéticas.
+    **Funcionalidades:** Upload CSV/Excel, Detecção auto, Limpeza, Visualização, Exportação.
     """)
     st.markdown("---")
-    st.caption(f"Versão 1.1 - {datetime.now().year}")
+    st.caption(f"Versão 1.2 - {datetime.now().year}")
 
 # Conteúdo Principal
 st.markdown('<div class="highlight">', unsafe_allow_html=True)
 st.markdown("""
 #### Como usar:
-1.  **Faça o upload** da planilha (CSV ou Excel).
-2.  **Confirme as colunas** de Código, Descrição e Valor Total detectadas (ou selecione manualmente).
-3.  Ajuste os **limites das classes A e B** na barra lateral (opcional).
+1.  **Upload** da planilha (CSV/Excel).
+2.  **Confirme/Selecione** as colunas (Código, Descrição, Valor Total são obrigatórias).
+3.  Ajuste os **limites A/B** (opcional).
 4.  Clique em **"Gerar Curva ABC"**.
-5.  **Analise** os gráficos e a tabela.
-6.  **Baixe** os resultados se desejar.
+5.  **Analise** e **Baixe** os resultados.
 """)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# Upload do arquivo
+# Upload
 uploaded_file = st.file_uploader("📂 Selecione a planilha sintética (CSV, XLSX, XLS)", type=["csv", "xlsx", "xls"], key="file_uploader")
 
-# Inicializa session_state se necessário
-if 'df_processed' not in st.session_state: st.session_state.df_processed = None
-if 'col_codigo' not in st.session_state: st.session_state.col_codigo = None
-if 'col_descricao' not in st.session_state: st.session_state.col_descricao = None
-if 'col_valor' not in st.session_state: st.session_state.col_valor = None
-if 'curva_gerada' not in st.session_state: st.session_state.curva_gerada = False
-if 'curva_abc' not in st.session_state: st.session_state.curva_abc = None
-if 'valor_total' not in st.session_state: st.session_state.valor_total = 0
+# Inicialização do Estado da Sessão
+default_state = {
+    'df_processed': None, 'col_codigo': None, 'col_descricao': None, 'col_valor': None,
+    'col_unidade': None, 'col_quantidade': None, 'col_custo_unitario': None, # Novas colunas
+    'curva_gerada': False, 'curva_abc': None, 'valor_total': 0,
+    'last_uploaded_filename': None
+}
+for key, value in default_state.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
-# Processa o arquivo se um novo for carregado
+# Processamento do Arquivo
 if uploaded_file is not None:
-    # Verifica se é um arquivo diferente do anterior para reprocessar
-    if 'last_uploaded_filename' not in st.session_state or st.session_state.last_uploaded_filename != uploaded_file.name:
+    if st.session_state.last_uploaded_filename != uploaded_file.name:
         st.session_state.last_uploaded_filename = uploaded_file.name
-        st.session_state.df_processed = None # Reseta dados processados
-        st.session_state.curva_gerada = False # Reseta flag de curva gerada
-        st.session_state.col_codigo = None
-        st.session_state.col_descricao = None
-        st.session_state.col_valor = None
+        # Reseta o estado ao carregar novo arquivo
+        for key in default_state: st.session_state[key] = default_state[key]
 
         with st.spinner('Processando arquivo...'):
             df_processed, delimitador = processar_arquivo(uploaded_file)
-            st.session_state.df_processed = df_processed # Armazena no estado da sessão
+            st.session_state.df_processed = df_processed
 
             if df_processed is not None:
-                st.success(f"Arquivo '{uploaded_file.name}' carregado e processado!")
-                # Identifica colunas após processar
+                st.success(f"Arquivo '{uploaded_file.name}' carregado!")
                 with st.spinner('Identificando colunas...'):
-                     st.session_state.col_codigo, st.session_state.col_descricao, st.session_state.col_valor = identificar_colunas(df_processed)
+                     # Atualiza o estado com as colunas identificadas
+                     cols = identificar_colunas(df_processed)
+                     st.session_state.col_codigo, st.session_state.col_descricao, st.session_state.col_valor, \
+                     st.session_state.col_unidade, st.session_state.col_quantidade, st.session_state.col_custo_unitario = cols
             else:
                 st.error("Falha ao processar o arquivo.")
-                # Limpa o estado se o processamento falhar
-                st.session_state.df_processed = None
-                st.session_state.last_uploaded_filename = None
+                st.session_state.last_uploaded_filename = None # Permite tentar carregar de novo
 
-
-# Exibe controles e botão de gerar se o arquivo foi processado
+# Exibição e Controles (se arquivo processado)
 if st.session_state.df_processed is not None:
-    df = st.session_state.df_processed # Pega o df do estado
+    df = st.session_state.df_processed
 
     with st.expander("🔍 Visualizar amostra dos dados carregados", expanded=False):
-        try:
-            st.dataframe(df.head(10))
-        except Exception as e:
-            st.warning(f"Não foi possível exibir a amostra em tabela: {e}. Mostrando como texto.")
-            st.text(df.head(10).to_string())
+        try: st.dataframe(df.head(10))
+        except Exception as e: st.warning(f"Erro ao exibir amostra: {e}")
 
     st.subheader("Confirme as Colunas para a Curva ABC")
     available_columns = [''] + list(df.columns) # Adiciona opção vazia
 
-    # Função auxiliar para obter índice seguro
     def get_safe_index(col_name, options):
-        try:
-            return options.index(col_name) if col_name and col_name in options else 0
-        except ValueError:
-            return 0
+        try: return options.index(col_name) if col_name and col_name in options else 0
+        except ValueError: return 0
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        col_codigo_selecionada = st.selectbox(
-            "Coluna de Código*", options=available_columns,
-            index=get_safe_index(st.session_state.col_codigo, available_columns),
-            key='select_codigo'
-        )
-    with col2:
-        col_descricao_selecionada = st.selectbox(
-            "Coluna de Descrição*", options=available_columns,
-            index=get_safe_index(st.session_state.col_descricao, available_columns),
-            key='select_descricao'
-        )
-    with col3:
-        col_valor_selecionada = st.selectbox(
-            "Coluna de Valor Total*", options=available_columns,
-            index=get_safe_index(st.session_state.col_valor, available_columns),
-            key='select_valor'
-        )
+    # Layout em 2 linhas para melhor organização
+    row1_cols = st.columns(3)
+    row2_cols = st.columns(3)
 
-    # Atualiza o estado da sessão com as colunas selecionadas
-    st.session_state.col_codigo = col_codigo_selecionada if col_codigo_selecionada else None
-    st.session_state.col_descricao = col_descricao_selecionada if col_descricao_selecionada else None
-    st.session_state.col_valor = col_valor_selecionada if col_valor_selecionada else None
+    with row1_cols[0]:
+        sel_codigo = st.selectbox("Código*", available_columns, index=get_safe_index(st.session_state.col_codigo, available_columns), key='sel_cod')
+    with row1_cols[1]:
+        sel_descricao = st.selectbox("Descrição*", available_columns, index=get_safe_index(st.session_state.col_descricao, available_columns), key='sel_desc')
+    with row1_cols[2]:
+        sel_valor = st.selectbox("Valor Total*", available_columns, index=get_safe_index(st.session_state.col_valor, available_columns), key='sel_val')
 
-    # Verifica se todas as colunas foram selecionadas
+    with row2_cols[0]:
+        sel_unidade = st.selectbox("Unidade (Opcional)", available_columns, index=get_safe_index(st.session_state.col_unidade, available_columns), key='sel_un')
+    with row2_cols[1]:
+        sel_quantidade = st.selectbox("Quantidade (Opcional)", available_columns, index=get_safe_index(st.session_state.col_quantidade, available_columns), key='sel_qtd')
+    with row2_cols[2]:
+        sel_custo_unitario = st.selectbox("Custo Unitário (Opcional)", available_columns, index=get_safe_index(st.session_state.col_custo_unitario, available_columns), key='sel_cu')
+
+    # Atualiza estado com seleções
+    st.session_state.col_codigo = sel_codigo if sel_codigo else None
+    st.session_state.col_descricao = sel_descricao if sel_descricao else None
+    st.session_state.col_valor = sel_valor if sel_valor else None
+    st.session_state.col_unidade = sel_unidade if sel_unidade else None
+    st.session_state.col_quantidade = sel_quantidade if sel_quantidade else None
+    st.session_state.col_custo_unitario = sel_custo_unitario if sel_custo_unitario else None
+
+    # Validação e Botão Gerar
     cols_ok = st.session_state.col_codigo and st.session_state.col_descricao and st.session_state.col_valor
-    if not cols_ok:
-         st.warning("Selecione todas as colunas marcadas com * para continuar.")
+    if not cols_ok: st.warning("Selecione as colunas obrigatórias (*) para continuar.")
 
-    # Botão para gerar a curva ABC (habilitado apenas se colunas OK)
     if st.button("🚀 Gerar Curva ABC", key="gerar_btn", disabled=not cols_ok):
         with st.spinner('Gerando Curva ABC...'):
             resultado, valor_total = gerar_curva_abc(
-                df,
-                st.session_state.col_codigo,
-                st.session_state.col_descricao,
-                st.session_state.col_valor,
-                st.session_state.limite_a,
-                st.session_state.limite_b
+                df, st.session_state.col_codigo, st.session_state.col_descricao, st.session_state.col_valor,
+                st.session_state.col_unidade, st.session_state.col_quantidade, st.session_state.col_custo_unitario, # Passa novas colunas
+                st.session_state.limite_a, st.session_state.limite_b
             )
-
             if resultado is not None:
                 st.session_state.curva_abc = resultado
                 st.session_state.valor_total = valor_total
                 st.session_state.curva_gerada = True
-                # Não precisa de rerun aqui, a exibição abaixo cuidará disso
             else:
-                st.error("Falha ao gerar a Curva ABC. Verifique os dados e as colunas selecionadas.")
+                st.error("Falha ao gerar a Curva ABC.")
                 st.session_state.curva_gerada = False
 
-# Exibir resultados se a curva ABC foi gerada com sucesso
+# Exibir Resultados
 if st.session_state.curva_gerada and st.session_state.curva_abc is not None:
     st.markdown("---")
     st.header("✅ Resultados da Curva ABC")
 
-    resultado = st.session_state.curva_abc
-    valor_total = st.session_state.valor_total
+    resultado_final = st.session_state.curva_abc # DataFrame com dados numéricos
+    valor_total_final = st.session_state.valor_total
 
-    # Renomear colunas para exibição amigável
-    df_exibicao = resultado.copy()
-    df_exibicao.columns = [
-        'Posição', 'Código', 'Descrição', 'Valor (R$)',
-        'Percentual (%)', 'Percentual Acumulado (%)', 'Classificação'
-    ]
-    # Formatar colunas numéricas para exibição
-    df_exibicao['Valor (R$)'] = df_exibicao['Valor (R$)'].map('{:,.2f}'.format)
-    df_exibicao['Percentual (%)'] = df_exibicao['Percentual (%)'].map('{:.2f}%'.format)
-    df_exibicao['Percentual Acumulado (%)'] = df_exibicao['Percentual Acumulado (%)'].map('{:.2f}%'.format)
-
-
-    # --- Estatísticas Resumo ---
+    # --- Resumo Estatístico ---
     st.subheader("📊 Resumo Estatístico")
     stats_cols = st.columns(4)
-    classes_count = resultado['classificacao'].value_counts().to_dict()
-    valor_por_classe = resultado.groupby('classificacao')['valor'].sum().to_dict()
-
-    with stats_cols[0]:
-        st.metric("Total de Itens", f"{len(resultado):,}")
-    with stats_cols[1]:
-        st.metric("Valor Total (R$)", f"{valor_total:,.2f}")
-    with stats_cols[2]:
-        count_a = classes_count.get('A', 0)
-        perc_count_a = (count_a / len(resultado) * 100) if len(resultado) > 0 else 0
-        st.metric("Itens Classe A", f"{count_a} ({perc_count_a:.1f}%)")
-    with stats_cols[3]:
-        value_a = valor_por_classe.get('A', 0)
-        perc_value_a = (value_a / valor_total * 100) if valor_total > 0 else 0
-        st.metric("Valor Classe A", f"{perc_value_a:.1f}%")
-    # Adicionar mais métricas se desejar (Classe B, C etc.)
+    classes_count = resultado_final['classificacao'].value_counts().to_dict()
+    valor_por_classe = resultado_final.groupby('classificacao')['valor'].sum().to_dict()
+    with stats_cols[0]: st.metric("Total Itens Agrupados", f"{len(resultado_final):,}")
+    with stats_cols[1]: st.metric("Valor Total (R$)", f"{valor_total_final:,.2f}")
+    count_a = classes_count.get('A', 0); perc_count_a = (count_a / len(resultado_final) * 100) if len(resultado_final) > 0 else 0
+    with stats_cols[2]: st.metric("Itens Classe A", f"{count_a} ({perc_count_a:.1f}%)")
+    value_a = valor_por_classe.get('A', 0); perc_value_a = (value_a / valor_total_final * 100) if valor_total_final > 0 else 0
+    with stats_cols[3]: st.metric("Valor Classe A", f"{perc_value_a:.1f}%")
 
     # --- Gráficos ---
     st.subheader("📈 Análise Gráfica")
     with st.spinner("Gerando gráficos..."):
-        fig = criar_graficos_plotly(resultado, valor_total) # Passa o DF original com números
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("Não foi possível gerar os gráficos.")
+        fig = criar_graficos_plotly(resultado_final, valor_total_final, st.session_state.limite_a, st.session_state.limite_b)
+        if fig: st.plotly_chart(fig, use_container_width=True)
+        else: st.warning("Não foi possível gerar os gráficos.")
 
-    # --- Tabela de Resultados com Filtros ---
+    # --- Tabela Detalhada ---
     st.subheader("📋 Tabela de Resultados Detalhada")
-    filter_cols = st.columns([0.3, 0.7]) # Colunas para filtros
+    filter_cols = st.columns([0.3, 0.7])
     with filter_cols[0]:
-        classe_filtro = st.multiselect(
-            "Filtrar por Classe",
-            options=sorted(resultado['classificacao'].unique()),
-            default=sorted(resultado['classificacao'].unique()),
-            key='filter_classe'
-        )
+        classe_filtro = st.multiselect("Filtrar Classe", options=sorted(resultado_final['classificacao'].unique()), default=sorted(resultado_final['classificacao'].unique()), key='filter_classe')
     with filter_cols[1]:
-        busca = st.text_input("Buscar por Código ou Descrição", key='search_term')
+        busca = st.text_input("Buscar Código/Descrição", key='search_term')
 
-    # Aplicar filtros ao DataFrame *original* antes da formatação para exibição
-    df_filtrado_orig = resultado[resultado['classificacao'].isin(classe_filtro)]
+    # Filtra o DataFrame original (numérico)
+    df_filtrado_orig = resultado_final[resultado_final['classificacao'].isin(classe_filtro)]
     if busca:
         df_filtrado_orig = df_filtrado_orig[
             df_filtrado_orig['codigo'].astype(str).str.contains(busca, case=False, na=False) |
             df_filtrado_orig['descricao'].astype(str).str.contains(busca, case=False, na=False)
         ]
 
-    # Formatar o DataFrame filtrado para exibição
-    df_filtrado_exibicao = df_filtrado_orig.copy()
-    df_filtrado_exibicao.columns = [
-        'Posição', 'Código', 'Descrição', 'Valor (R$)',
-        'Percentual (%)', 'Percentual Acumulado (%)', 'Classificação'
-    ]
-    # Aplicar formatação apenas para exibição na tabela
-    df_filtrado_exibicao['Valor (R$)'] = df_filtrado_orig['valor'].map('R$ {:,.2f}'.format)
-    df_filtrado_exibicao['Percentual (%)'] = df_filtrado_orig['percentual'].map('{:.2f}%'.format)
-    df_filtrado_exibicao['Percentual Acumulado (%)'] = df_filtrado_orig['percentual_acumulado'].map('{:.2f}%'.format)
+    # Cria cópia para exibição e aplica formatação
+    df_exibicao = df_filtrado_orig.copy()
+    # Renomeia colunas para exibição
+    rename_map_display = {
+        'posicao': 'Pos', 'codigo': 'Código', 'descricao': 'Descrição', 'unidade': 'Und',
+        'quantidade': 'Qtd', 'custo_unitario': 'Custo Unit.', 'valor': 'Custo Total',
+        'custo_total_acumulado': 'Custo Acum.', 'percentual_acumulado': '% Acum.',
+        'classificacao': 'Classe'
+        # 'percentual': '%' # Se quiser mostrar
+    }
+    df_exibicao.rename(columns=rename_map_display, inplace=True)
+    # Formata colunas numéricas como string para exibição
+    format_map = {
+        'Custo Unit.': 'R$ {:,.2f}', 'Custo Total': 'R$ {:,.2f}', 'Custo Acum.': 'R$ {:,.2f}',
+        '% Acum.': '{:.2f}%', #'%' : '{:.2f}%',
+        'Qtd': '{:,.2f}' # Formata quantidade com 2 decimais
+    }
+    for col, fmt in format_map.items():
+         if col in df_exibicao.columns:
+              # Aplica formatação, tratando possíveis erros
+              try: df_exibicao[col] = df_exibicao[col].map(lambda x: fmt.format(x) if pd.notna(x) else '')
+              except (TypeError, ValueError): pass # Ignora erro de formatação
 
-    st.dataframe(df_filtrado_exibicao, height=400, use_container_width=True)
+    # Seleciona apenas colunas que existem após renomear
+    cols_to_display = [col for col in rename_map_display.values() if col in df_exibicao.columns]
+    st.dataframe(df_exibicao[cols_to_display], height=400, use_container_width=True)
 
     # --- Downloads ---
     st.subheader("📥 Downloads")
@@ -943,22 +830,13 @@ if st.session_state.curva_gerada and st.session_state.curva_abc is not None:
     csv_filename = f"curva_abc_{data_atual}.csv"
     excel_filename = f"curva_abc_{data_atual}.xlsx"
 
-    # Usar o DataFrame com nomes de coluna amigáveis para download
-    df_download = resultado.copy()
-    df_download.columns = [
-        'Posição', 'Código', 'Descrição', 'Valor_R$',
-        'Percentual_%', 'Percentual_Acumulado_%', 'Classificação'
-    ]
-
-
     with dl_cols[0]:
-         get_download_link(df_download, csv_filename, "Baixar como CSV", file_format='csv')
+         # Passa o DataFrame original (resultado_final) para a função de download
+         get_download_link(resultado_final, csv_filename, "Baixar como CSV", file_format='csv')
     with dl_cols[1]:
-         get_download_link(df_download, excel_filename, "Baixar como Excel", file_format='excel')
-
+         get_download_link(resultado_final, excel_filename, "Baixar como Excel", file_format='excel')
 
 # Rodapé
 st.markdown('<div class="footer">', unsafe_allow_html=True)
 st.markdown(f"© {datetime.now().year} - Gerador de Curva ABC | Adaptado para Planilhas SINAPI")
 st.markdown('</div>', unsafe_allow_html=True)
-
