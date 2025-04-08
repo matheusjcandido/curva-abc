@@ -229,8 +229,20 @@ def truncate(number, decimals=0):
 
 def identificar_colunas(df):
     """Identifica heuristicamente as colunas necessárias."""
-    identified_cols = {}; cols_lower_map = {str(col).lower().strip(): col for col in df.columns}; df_cols_list = list(df.columns)
-    exact_matches = {'codigo': ['código do serviço', 'código', 'codigo', 'cod.', 'item', 'ref'],'descricao': ['descrição do serviço', 'descrição', 'descricao', 'desc', 'especificação', 'serviço'],'valor': ['custo total', 'valor total', 'preço total', 'total', 'valor'],'unidade': ['unidade de medida', 'unid', 'unidade', 'und', 'um'],'quantidade': ['quantidade', 'quantidade total', 'quant', 'qtd', 'qtde'],'custo_unitario': ['custo unitário', 'preço unitário', 'valor unitário', 'custo unitario', 'preco unitario', 'valor unitario', 'unitário']}
+    identified_cols = {}
+    cols_lower_map = {str(col).lower().strip(): col for col in df.columns}
+    df_cols_list = list(df.columns) # Lista de nomes de colunas originais
+
+    exact_matches = {
+        'codigo': ['código do serviço', 'código', 'codigo', 'cod.', 'item', 'ref'],
+        'descricao': ['descrição do serviço', 'descrição', 'descricao', 'desc', 'especificação', 'serviço'],
+        'valor': ['custo total', 'valor total', 'preço total', 'total', 'valor'],
+        'unidade': ['unidade de medida', 'unid', 'unidade', 'und', 'um'],
+        'quantidade': ['quantidade', 'quantidade total', 'quant', 'qtd', 'qtde'],
+        'custo_unitario': ['custo unitário', 'preço unitário', 'valor unitário', 'custo unitario', 'preco unitario', 'valor unitario', 'unitário']
+    }
+
+    # Identificação por nomes exatos
     for target, patterns in exact_matches.items():
         if target in identified_cols: continue
         for pattern in patterns:
@@ -242,7 +254,11 @@ def identificar_colunas(df):
                          is_num_ok = False
                          try: is_num_ok = pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
                          except Exception: pass
-                    if is_num_ok: identified_cols[target] = col_original; break
+                    if is_num_ok:
+                        identified_cols[target] = col_original
+                        break
+
+    # Heurística para Quantidade após Unidade
     if 'quantidade' not in identified_cols and 'unidade' in identified_cols:
         col_unidade_nome = identified_cols['unidade']
         try:
@@ -255,19 +271,49 @@ def identificar_colunas(df):
                     except Exception: pass
                     if is_num_ok: identified_cols['quantidade'] = col_seguinte
         except ValueError: pass
+
+
+    # Fallback para Descrição
     available = [c for c in df.columns if c not in identified_cols.values()]
     if 'descricao' not in identified_cols and available:
-         try: identified_cols['descricao'] = max(available, key=lambda c: df[c].astype(str).str.len().mean())
-         except Exception: pass
-    available = [c for c in df.columns if c not in identified_cols.values()]
+        try:
+            mean_lengths = {col: df[col].astype(str).str.len().mean() for col in available}
+            if mean_lengths:
+                identified_cols['descricao'] = max(mean_lengths, key=mean_lengths.get)
+        except Exception:
+            pass # Ignora erro
+
+    # *** LÓGICA DE FALLBACK PARA VALOR REESTRUTURADA ***
+    available = [c for c in df.columns if c not in identified_cols.values()] # Atualiza disponíveis
     if 'valor' not in identified_cols and available:
-         best_val_col = None; max_s = -1
-         for col in available:
-              try: vals = df[col].apply(limpar_valor); s = vals.sum(); c = vals.count(); l = len(df)
-                   if s > max_s and c > l * 0.1: max_s = s; best_val_col = col
-              except Exception: continue
-         if best_val_col: identified_cols['valor'] = best_val_col
-    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'), identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
+        col_sums = {} # Dicionário para guardar somas das colunas válidas
+        # Calcula as somas primeiro
+        for col in available:
+            try:
+                # Limpa e converte a coluna
+                vals = df[col].apply(limpar_valor)
+                # Calcula soma e contagem de valores não nulos
+                s = vals.sum()
+                c = vals.count()
+                l = len(df)
+                # Considera a coluna válida se tiver mais de 10% de valores numéricos
+                if c > l * 0.1:
+                    col_sums[col] = s # Armazena a soma
+            except Exception:
+                # Ignora colunas que causam erro durante limpeza/soma
+                continue
+
+        # Encontra a coluna com a maior soma entre as válidas
+        if col_sums: # Verifica se alguma coluna foi processada com sucesso
+            best_val_col = max(col_sums, key=col_sums.get)
+            # Garante que a soma máxima seja positiva antes de atribuir
+            if col_sums[best_val_col] > 0:
+                 identified_cols['valor'] = best_val_col
+            # else: Nenhuma coluna com soma positiva encontrada
+
+    # Retorna as colunas identificadas
+    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'),
+            identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
 
 
 def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, col_cu=None, lim_a=80, lim_b=95):
@@ -277,7 +323,6 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
     optional = {'unidade': col_un, 'quantidade': col_qtd, 'custo_unitario': col_cu}
     cols_to_use = list(essential.values()) + [c for c in optional.values() if c and c in df.columns]
     valid_optional = {k: v for k, v in optional.items() if v and v in df.columns}
-    # Verifica se pode calcular Qtd * CU e se a coluna unidade foi selecionada
     can_calculate_total = 'quantidade' in valid_optional and 'custo_unitario' in valid_optional
     unit_col_present = 'unidade' in valid_optional
 
@@ -300,51 +345,27 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
 
         df_agg = df_work.groupby('codigo_str').agg(**agg_config).reset_index().rename(columns={'codigo_str': 'codigo'})
 
-        # Calcula Custo Total (Qtd * CU) se possível, ajustando para unidade '%'
         if can_calculate_total:
-            # Define a função para calcular o valor da linha, verificando a unidade
             def calculate_row_total(row):
-                qtd = row['quantidade']
-                cu = row['custo_unitario']
-                # Verifica a unidade apenas se a coluna 'unidade' existir no df_agg
+                qtd = row['quantidade']; cu = row['custo_unitario']
                 unit = str(row.get('unidade', '')).strip() if 'unidade' in df_agg.columns else ''
-
-                if unit == '%':
-                    # Divide quantidade por 100 se unidade for '%'
-                    # Garante que qtd e cu sejam numéricos antes de operar
-                    if pd.notna(qtd) and pd.notna(cu):
-                         return (float(qtd) / 100.0) * float(cu)
-                    else: return 0.0 # Ou NaN, ou algum tratamento de erro
-                else:
-                    # Cálculo padrão para outras unidades
-                    if pd.notna(qtd) and pd.notna(cu):
-                         return float(qtd) * float(cu)
-                    else: return 0.0
-
-            # Aplica a função de cálculo
+                if unit == '%': return (float(qtd) / 100.0) * float(cu) if pd.notna(qtd) and pd.notna(cu) else 0.0
+                else: return float(qtd) * float(cu) if pd.notna(qtd) and pd.notna(cu) else 0.0
             df_agg['valor_calc'] = df_agg.apply(calculate_row_total, axis=1)
-            # Trunca o valor calculado
             df_agg['valor'] = df_agg['valor_calc'].apply(lambda x: truncate(x, 2))
-            df_agg = df_agg[df_agg['valor'] > 0] # Filtra após truncar
+            df_agg = df_agg[df_agg['valor'] > 0]
             if df_agg.empty: st.error("Nenhum item com Custo Total calculado > 0."); return None, 0, None
-            # Remove coluna de cálculo intermediário
             df_agg = df_agg.drop(columns=['valor_calc'])
         else:
-            # Fallback: Usa a soma do valor original se não puder calcular
-            st.warning("Colunas 'Quantidade' e/ou 'Custo Unitário' não selecionadas ou inválidas. Usando o 'Valor Total' original para a curva ABC.")
+            st.warning("Usando o 'Valor Total' original para a curva ABC.")
             df_agg['valor'] = df_agg['valor_original_sum']
             df_agg = df_agg[df_agg['valor'] > 0]
             if df_agg.empty: st.error("Nenhum item com Valor Total original > 0."); return None, 0, None
+        if 'valor_original_sum' in df_agg.columns: df_agg = df_agg.drop(columns=['valor_original_sum'])
 
-        # Remove coluna temporária do valor original somado
-        if 'valor_original_sum' in df_agg.columns:
-            df_agg = df_agg.drop(columns=['valor_original_sum'])
-
-        # Recalcula v_total com base no 'valor' final
         v_total = df_agg['valor'].sum()
-        if v_total <= 0: st.error("Valor total final é zero ou negativo."); return None, 0, None # Adicionado verificação <= 0
+        if v_total <= 0: st.error("Valor total final é zero ou negativo."); return None, 0, None
 
-        # Continua com cálculos da curva ABC
         df_curve = df_agg.sort_values('valor', ascending=False).reset_index(drop=True)
         df_curve['percentual'] = (df_curve['valor'] / v_total * 100)
         df_curve['percentual_acumulado'] = df_curve['percentual'].cumsum()
@@ -352,29 +373,20 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
         df_curve['classificacao'] = df_curve['percentual_acumulado'].apply(lambda p: 'A' if p <= lim_a + 1e-9 else ('B' if p <= lim_b + 1e-9 else 'C'))
         df_curve['posicao'] = range(1, len(df_curve) + 1)
 
-        # Ordem das colunas internas (sem 'posicao')
         final_cols_internal = ['codigo', 'descricao']
-        if 'unidade' in df_curve.columns: final_cols_internal.append('unidade') # Verifica se existe após agg
+        if 'unidade' in df_curve.columns: final_cols_internal.append('unidade')
         if 'quantidade' in df_curve.columns: final_cols_internal.append('quantidade')
         if 'custo_unitario' in df_curve.columns: final_cols_internal.append('custo_unitario')
         final_cols_internal.extend(['valor', 'custo_total_acumulado', 'percentual', 'percentual_acumulado', 'classificacao'])
-
         df_final = df_curve.reindex(columns=final_cols_internal)
-        df_curve_with_pos = df_curve # Guarda versão com posição para gráfico
+        df_curve_with_pos = df_curve
 
         return df_final, v_total, df_curve_with_pos
-
-    except KeyError as e:
-         st.error(f"Erro: Coluna essencial não encontrada: {e}.")
-         return None, 0, None
-    except Exception as e:
-         st.error(f"Erro inesperado ao gerar curva ABC: {str(e)}")
-         return None, 0, None
-
+    except KeyError as e: st.error(f"Erro: Coluna essencial não encontrada: {e}."); return None, 0, None
+    except Exception as e: st.error(f"Erro inesperado gerar curva: {str(e)}"); return None, 0, None
 
 # --- Funções de Visualização e Download ---
 
-# Recebe df_curve_with_pos para o gráfico de Pareto
 def criar_graficos_plotly(df_curva_with_pos, valor_total, limite_a, limite_b):
     """Cria gráficos interativos usando Plotly."""
     if df_curva_with_pos is None or df_curva_with_pos.empty: return None
@@ -497,7 +509,6 @@ if st.session_state.df_processed is not None:
 
     cols_ok = st.session_state.sel_cod and st.session_state.sel_desc and st.session_state.sel_val # Validação ainda usa valor original
     if not cols_ok: st.warning("Selecione colunas obrigatórias (*).")
-    # Aviso se Qtd ou CU não forem selecionados para o cálculo
     if cols_ok and not (st.session_state.sel_qtd and st.session_state.sel_cu):
          st.info("Se as colunas 'Quantidade' e 'Custo Unitário' não forem selecionadas, o 'Valor Total' original será usado para a curva ABC.")
 
