@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import traceback # Para exibir detalhes do erro
 import math # Para truncamento (se necessário, mas vamos focar na formatação)
+import xlsxwriter # Importado explicitamente para referência
 
 # Configuração da página
 st.set_page_config(
@@ -220,70 +221,34 @@ def limpar_quantidade(qtd):
 
 def identificar_colunas(df):
     """Identifica heuristicamente as colunas necessárias."""
-    identified_cols = {}
-    cols_lower_map = {str(col).lower().strip(): col for col in df.columns}
-    exact_matches = {
-        'codigo': ['código', 'codigo', 'cod.', 'item', 'ref'],
-        'descricao': ['descrição', 'descricao', 'desc', 'especificação', 'serviço'],
-        'valor': ['valor total', 'custo total', 'preço total', 'total', 'valor'],
-        'unidade': ['unid', 'unidade', 'und', 'um'],
-        'quantidade': ['quantidade', 'quant', 'qtd', 'qtde'],
-        'custo_unitario': ['custo unitário', 'custo unitario', 'preço unitário', 'valor unitário', 'unitário']
-    }
-
-    # Identificação por nomes exatos
+    identified_cols = {}; cols_lower_map = {str(col).lower().strip(): col for col in df.columns}
+    exact_matches = {'codigo': ['código', 'codigo', 'cod.', 'item', 'ref'],'descricao': ['descrição', 'descricao', 'desc', 'especificação', 'serviço'],'valor': ['valor total', 'custo total', 'preço total', 'total', 'valor'],'unidade': ['unid', 'unidade', 'und', 'um'],'quantidade': ['quantidade', 'quant', 'qtd', 'qtde'],'custo_unitario': ['custo unitário', 'custo unitario', 'preço unitário', 'valor unitário', 'unitário']}
     for target, patterns in exact_matches.items():
         if target in identified_cols: continue
         for pattern in patterns:
             if pattern in cols_lower_map:
                 col_original = cols_lower_map[pattern]
                 if col_original not in identified_cols.values():
-                    is_num_ok = True # Assume OK para não numéricos
+                    is_num_ok = True
                     if target in ['valor', 'custo_unitario', 'quantidade']:
-                        is_num_ok = False # Precisa verificar se parece numérico
-                        try: is_num_ok = pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
-                        except Exception: pass # Ignora erro na verificação
-                    if is_num_ok:
-                        identified_cols[target] = col_original
-                        break # Achou para este target
-
-    # Fallback para Descrição (coluna com strings mais longas)
+                         is_num_ok = False
+                         try: is_num_ok = pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
+                         except Exception: pass
+                    if is_num_ok: identified_cols[target] = col_original; break
     available = [c for c in df.columns if c not in identified_cols.values()]
     if 'descricao' not in identified_cols and available:
-        try:
-            mean_lengths = {col: df[col].astype(str).str.len().mean() for col in available}
-            if mean_lengths:
-                identified_cols['descricao'] = max(mean_lengths, key=mean_lengths.get)
-        except Exception: pass # Ignora erro
-
-    # Fallback para Valor (coluna com maior soma numérica)
-    available = [c for c in df.columns if c not in identified_cols.values()] # Atualiza disponíveis
+         try: identified_cols['descricao'] = max(available, key=lambda c: df[c].astype(str).str.len().mean())
+         except Exception: pass
+    available = [c for c in df.columns if c not in identified_cols.values()]
     if 'valor' not in identified_cols and available:
-        best_val_col = None
-        max_s = -1
-        for col in available:
-            # *** CORREÇÃO DE INDENTAÇÃO APLICADA AQUI ***
-            try:
-                # Calcula soma, contagem de não nulos e total de linhas
-                vals = df[col].apply(limpar_valor)
-                s = vals.sum()
-                c = vals.count() # Conta valores não-nulos após limpeza
-                l = len(df)      # Total de linhas
-                # Condição: Soma maior que a máxima atual E contagem > 10% do total
-                if s > max_s and c > l * 0.1:
-                    max_s = s
-                    best_val_col = col
-            except Exception:
-                # Ignora coluna se houver erro no processamento/cálculo
-                continue
-        # Atribui a melhor coluna encontrada (se houver)
-        if best_val_col:
-            identified_cols['valor'] = best_val_col
-
-    # Retorna as colunas identificadas (pode ser None se não achou)
-    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'),
-            identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
-
+         best_val_col = None; max_s = -1
+         for col in available:
+              try:
+                   vals = df[col].apply(limpar_valor); s = vals.sum(); c = vals.count(); l = len(df)
+                   if s > max_s and c > l * 0.1: max_s = s; best_val_col = col
+              except Exception: continue
+         if best_val_col: identified_cols['valor'] = best_val_col
+    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'), identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
 
 def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, col_cu=None, lim_a=80, lim_b=95):
     """Gera a curva ABC com todas as colunas necessárias."""
@@ -315,8 +280,8 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
         if 'unidade' in valid_optional: final_cols.append('unidade')
         if 'quantidade' in valid_optional: final_cols.append('quantidade')
         if 'custo_unitario' in valid_optional: final_cols.append('custo_unitario')
-        final_cols.extend(['valor', 'custo_total_acumulado', 'percentual', 'percentual_acumulado', 'classificacao'])
-        df_final = df_curve.reindex(columns=final_cols)
+        final_cols.extend(['valor', 'custo_total_acumulado', 'percentual', 'percentual_acumulado', 'classificacao']) # Ensure 'percentual' is included
+        df_final = df_curve.reindex(columns=final_cols) # Use reindex to ensure all columns are present, even if optional ones were missing
         return df_final, v_total
     except Exception as e: st.error(f"Erro gerar curva: {e}"); # with st.expander("Detalhes"): st.text(traceback.format_exc())
     return None, 0
@@ -329,21 +294,36 @@ def criar_graficos_plotly(df_curva, valor_total, limite_a, limite_b):
     try:
         fig = make_subplots(rows=2, cols=2, subplot_titles=("Diagrama de Pareto", "Distribuição Valor (%)", "Distribuição Quantidade (%)", "Top 10 Itens (Valor)"), specs=[[{"secondary_y": True}, {"type": "pie"}], [{"type": "pie"}, {"type": "bar"}]], vertical_spacing=0.15, horizontal_spacing=0.1)
         colors = {'A': '#2ca02c', 'B': '#ff7f0e', 'C': '#d62728'}
+
+        # Pareto
         fig.add_trace(go.Bar(x=df_curva['posicao'], y=df_curva['valor'], name='Valor', marker_color=df_curva['classificacao'].map(colors), text=df_curva['codigo'], hoverinfo='x+y+text+name'), secondary_y=False, row=1, col=1)
         fig.add_trace(go.Scatter(x=df_curva['posicao'], y=df_curva['percentual_acumulado'], name='% Acum.', mode='lines+markers', line=dict(color='#1f77b4', width=2), marker=dict(size=4)), secondary_y=True, row=1, col=1)
         fig.add_hline(y=limite_a, line_dash="dash", line_color="grey", annotation_text=f"A ({limite_a}%)", secondary_y=True, row=1, col=1); fig.add_hline(y=limite_b, line_dash="dash", line_color="grey", annotation_text=f"B ({limite_b}%)", secondary_y=True, row=1, col=1)
+
+        # Pizza Valor
         valor_classe = df_curva.groupby('classificacao')['valor'].sum().reindex(['A', 'B', 'C']).fillna(0)
-        fig.add_trace(go.Pie(labels=valor_classe.index, values=valor_classe.values, name='Valor', marker_colors=[colors.get(c, '#888') for c in valor_classe.index], hole=0.4, pull=[0.05 if c == 'A' else 0]*3, textinfo='percent+label', hoverinfo='label+percent+value+name'), row=1, col=2)
+        # *** CORREÇÃO GRÁFICO 1: pull list comprehension ***
+        pull_valor = [0.05 if label == 'A' else 0 for label in valor_classe.index]
+        fig.add_trace(go.Pie(labels=valor_classe.index, values=valor_classe.values, name='Valor', marker_colors=[colors.get(c, '#888') for c in valor_classe.index], hole=0.4, pull=pull_valor, textinfo='percent+label', hoverinfo='label+percent+value+name'), row=1, col=2)
+
+        # Pizza Quantidade
         qtd_classe = df_curva['classificacao'].value_counts().reindex(['A', 'B', 'C']).fillna(0)
-        fig.add_trace(go.Pie(labels=qtd_classe.index, values=qtd_classe.values, name='Qtd', marker_colors=[colors.get(c, '#888') for c in qtd_classe.index], hole=0.4, pull=[0.05 if c == 'A' else 0]*3, textinfo='percent+label', hoverinfo='label+percent+value+name'), row=2, col=1)
+        # *** CORREÇÃO GRÁFICO 2: pull list comprehension ***
+        pull_qtd = [0.05 if label == 'A' else 0 for label in qtd_classe.index]
+        fig.add_trace(go.Pie(labels=qtd_classe.index, values=qtd_classe.values, name='Qtd', marker_colors=[colors.get(c, '#888') for c in qtd_classe.index], hole=0.4, pull=pull_qtd, textinfo='percent+label', hoverinfo='label+percent+value+name'), row=2, col=1)
+
+        # Top 10
         top10 = df_curva.head(10).sort_values('valor', ascending=True)
         fig.add_trace(go.Bar(y=top10['codigo'] + ' (' + top10['descricao'].str[:30] + '...)', x=top10['valor'], name='Top 10', orientation='h', marker_color=top10['classificacao'].map(colors), text=top10['valor'].map('R$ {:,.2f}'.format), textposition='outside', hoverinfo='y+x+name'), row=2, col=2)
+
+        # Layout
         fig.update_layout(height=850, showlegend=False, title_text="Análise Gráfica da Curva ABC", title_x=0.5, title_font_size=22, margin=dict(l=20, r=20, t=80, b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         fig.update_yaxes(title_text="Valor (R$)", secondary_y=False, row=1, col=1); fig.update_yaxes(title_text="% Acumulado", secondary_y=True, row=1, col=1, range=[0, 101])
         fig.update_xaxes(title_text="Posição", row=1, col=1); fig.update_xaxes(title_text="Valor (R$)", row=2, col=2); fig.update_yaxes(title_text="Item", autorange="reversed", row=2, col=2, tickfont_size=10)
         for i, title in enumerate(["<b>Pareto</b>", "<b>Valor (%)</b>", "<b>Quantidade (%)</b>", "<b>Top 10 Itens</b>"]): fig.layout.annotations[i].update(text=title)
         return fig
-    except Exception as e: st.error(f"Erro gráficos: {e}"); return None
+    except Exception as e: st.error(f"Erro gráficos: {e}"); # with st.expander("Detalhes"): st.text(traceback.format_exc()) # Comentado para não poluir
+    return None
 
 def get_download_link(df_orig, filename, text, file_format='csv'):
     """Gera botão de download para CSV ou Excel com colunas e nomes corretos."""
@@ -353,30 +333,39 @@ def get_download_link(df_orig, filename, text, file_format='csv'):
         df_download.rename(columns=rename_map_download, inplace=True)
         download_col_order = ['CÓDIGO DO SERVIÇO', 'DESCRIÇÃO DO SERVIÇO', 'UNIDADE DE MEDIDA', 'QUANTIDADE TOTAL', 'CUSTO UNITÁRIO', 'CUSTO TOTAL', 'CUSTO TOTAL ACUMULADO', '% DO ITEM', '% ACUMULADO', 'FAIXA', 'ITEM']
         df_download = df_download[[col for col in download_col_order if col in df_download.columns]]
-        if file_format == 'csv': data = df_download.to_csv(index=False, sep=';', decimal=',', encoding='utf-8-sig'); mime = 'text/csv'
+
+        if file_format == 'csv':
+            data = df_download.to_csv(index=False, sep=';', decimal=',', encoding='utf-8-sig')
+            mime = 'text/csv'
         elif file_format == 'excel':
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df_download.to_excel(writer, sheet_name='Curva ABC', index=False)
-                workbook = writer.book; worksheet = writer.sheets['Curva ABC']
+                workbook = writer.book
+                worksheet = writer.sheets['Curva ABC']
+                # *** CORREÇÃO DOWNLOAD EXCEL: Simplifica formatação ***
+                # Aplica apenas formato de cabeçalho e largura automática básica
                 header_fmt = workbook.add_format({'bold': True, 'bg_color': '#1e3c72', 'color': 'white', 'align': 'center', 'valign': 'vcenter', 'border': 1})
-                currency_fmt = workbook.add_format({'num_format': 'R$ #,##0.00', 'border': 1}); percent_fmt = workbook.add_format({'num_format': '0.00%', 'border': 1}); number_fmt = workbook.add_format({'num_format': '#,##0.00', 'border': 1}); center_fmt = workbook.add_format({'align': 'center', 'border': 1})
-                for col_num, value in enumerate(df_download.columns.values): worksheet.write(0, col_num, value, header_fmt)
-                col_map = {name: i for i, name in enumerate(df_download.columns)}
-                currency_cols = ['CUSTO UNITÁRIO', 'CUSTO TOTAL', 'CUSTO TOTAL ACUMULADO']; percent_cols = ['% DO ITEM', '% ACUMULADO']; number_cols = ['QUANTIDADE TOTAL']; center_cols = ['FAIXA', 'ITEM']
-                for col_name in df_download.columns:
-                    col_idx = col_map[col_name]; fmt = None
-                    if col_name in currency_cols: fmt = currency_fmt
-                    elif col_name in percent_cols: fmt = percent_fmt
-                    elif col_name in number_cols: fmt = number_fmt
-                    elif col_name in center_cols: fmt = center_fmt
-                    try: width = min(max(df_download[col_name].astype(str).map(len).max(), len(col_name)) + 2, 60)
-                    except: width = len(col_name) + 5
-                    worksheet.set_column(col_idx, col_idx, width, fmt)
-            output.seek(0); data = output.read(); mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        else: st.error("Formato inválido."); return
+                for col_num, value in enumerate(df_download.columns.values):
+                    worksheet.write(0, col_num, value, header_fmt)
+                    # Ajuste básico de largura
+                    try:
+                        width = max(df_download[value].astype(str).map(len).max(), len(value))
+                        worksheet.set_column(col_num, col_num, min(width + 2, 60)) # Limita largura
+                    except:
+                        worksheet.set_column(col_num, col_num, len(value) + 5) # Fallback
+
+            output.seek(0)
+            data = output.read()
+            mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        else:
+            st.error("Formato inválido.")
+            return
+
         st.download_button(label=text, data=data, file_name=filename, mime=mime, key=f"dl_{file_format}")
-    except Exception as e: st.error(f"Erro download ({file_format}): {e}")
+    except Exception as e:
+        st.error(f"Erro download ({file_format}): {e}")
+        # with st.expander("Detalhes Erro Download"): st.text(traceback.format_exc()) # Comentado
 
 # --- Interface Streamlit ---
 
@@ -388,7 +377,7 @@ with st.sidebar:
     lim_a = st.slider("Limite A (%)", 50, 95, st.session_state.limite_a, 1, key='lim_a_sld')
     lim_b_min = lim_a + 1; lim_b = st.slider("Limite B (%)", lim_b_min, 99, max(st.session_state.limite_b, lim_b_min), 1, key='lim_b_sld')
     st.session_state.limite_a, st.session_state.limite_b = lim_a, lim_b
-    st.markdown("---"); st.subheader("ℹ️ Sobre"); st.info("Gera Curvas ABC. v1.4"); st.markdown("---"); st.caption(f"© {datetime.now().year}")
+    st.markdown("---"); st.subheader("ℹ️ Sobre"); st.info("Gera Curvas ABC. v1.5"); st.markdown("---"); st.caption(f"© {datetime.now().year}")
 
 # Conteúdo Principal
 st.markdown('<div class="highlight">', unsafe_allow_html=True); st.markdown("#### Como usar:\n1. **Upload**.\n2. **Confirme Colunas**.\n3. Ajuste **Limites**.\n4. Clique **Gerar**.\n5. **Analise/Baixe**."); st.markdown('</div>', unsafe_allow_html=True)
