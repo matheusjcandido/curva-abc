@@ -202,73 +202,88 @@ def limpar_valor(valor):
     if ',' in s and '.' in s: s = s.replace('.', '', s.count('.') - 1).replace(',', '.') if s.rfind(',') > s.rfind('.') else s.replace(',', '')
     elif ',' in s: s = s.replace(',', '.')
     s = re.sub(r'[^\d.]', '', s)
-    try:
-        # Return float(s) if s is not empty, otherwise 0.0
-        return float(s) if s else 0.0
-    except ValueError:
-        # Return 0.0 if conversion fails
-        return 0.0
+    try: return float(s) if s else 0.0
+    except ValueError: return 0.0
 
 def limpar_quantidade(qtd):
     """Limpa e converte valores de quantidade para float."""
-    if pd.isna(qtd):
-        return 0.0
-    if isinstance(qtd, (int, float, np.number)):
-        return float(qtd)
-    s = str(qtd).strip()
-    if not s:
-        return 0.0
-    # Remove espaços, mas mantém . e ,
+    if pd.isna(qtd): return 0.0
+    if isinstance(qtd, (int, float, np.number)): return float(qtd)
+    s = str(qtd).strip();
+    if not s: return 0.0
     s = re.sub(r'[\s]', '', s)
-    # Lógica de separador decimal (igual a limpar_valor)
-    has_comma = ',' in s
-    has_dot = '.' in s
-    if has_comma and has_dot:
-        last_comma_pos = s.rfind(',')
-        last_dot_pos = s.rfind('.')
-        if last_comma_pos > last_dot_pos:
-            s = s.replace('.', '').replace(',', '.')
-        else:
-            s = s.replace(',', '')
-    elif has_comma:
-        s = s.replace(',', '.')
-    # Remove não numéricos exceto ponto
+    if ',' in s and '.' in s: s = s.replace('.', '', s.count('.') - 1).replace(',', '.') if s.rfind(',') > s.rfind('.') else s.replace(',', '')
+    elif ',' in s: s = s.replace(',', '.')
     s = re.sub(r'[^\d.]', '', s)
-    try:
-        # Return float(s) if s is not empty, otherwise 0.0
-        return float(s) if s else 0.0
-    except ValueError:
-        # Return 0.0 if conversion fails
-        return 0.0
+    try: return float(s) if s else 0.0
+    except ValueError: return 0.0
 
 def identificar_colunas(df):
     """Identifica heuristicamente as colunas necessárias."""
-    identified_cols = {}; cols_lower_map = {str(col).lower().strip(): col for col in df.columns}
-    exact_matches = {'codigo': ['código', 'codigo', 'cod.', 'item', 'ref'],'descricao': ['descrição', 'descricao', 'desc', 'especificação', 'serviço'],'valor': ['valor total', 'custo total', 'preço total', 'total', 'valor'],'unidade': ['unid', 'unidade', 'und', 'um'],'quantidade': ['quantidade', 'quant', 'qtd', 'qtde'],'custo_unitario': ['custo unitário', 'custo unitario', 'preço unitário', 'valor unitário', 'unitário']}
+    identified_cols = {}
+    cols_lower_map = {str(col).lower().strip(): col for col in df.columns}
+    exact_matches = {
+        'codigo': ['código', 'codigo', 'cod.', 'item', 'ref'],
+        'descricao': ['descrição', 'descricao', 'desc', 'especificação', 'serviço'],
+        'valor': ['valor total', 'custo total', 'preço total', 'total', 'valor'],
+        'unidade': ['unid', 'unidade', 'und', 'um'],
+        'quantidade': ['quantidade', 'quant', 'qtd', 'qtde'],
+        'custo_unitario': ['custo unitário', 'custo unitario', 'preço unitário', 'valor unitário', 'unitário']
+    }
+
+    # Identificação por nomes exatos
     for target, patterns in exact_matches.items():
         if target in identified_cols: continue
         for pattern in patterns:
             if pattern in cols_lower_map:
                 col_original = cols_lower_map[pattern]
                 if col_original not in identified_cols.values():
-                    is_num = True
+                    is_num_ok = True # Assume OK para não numéricos
                     if target in ['valor', 'custo_unitario', 'quantidade']:
-                         try: is_num = pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
-                         except Exception: pass
-                    if is_num: identified_cols[target] = col_original; break
+                        is_num_ok = False # Precisa verificar se parece numérico
+                        try: is_num_ok = pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
+                        except Exception: pass # Ignora erro na verificação
+                    if is_num_ok:
+                        identified_cols[target] = col_original
+                        break # Achou para este target
+
+    # Fallback para Descrição (coluna com strings mais longas)
     available = [c for c in df.columns if c not in identified_cols.values()]
     if 'descricao' not in identified_cols and available:
-         try: identified_cols['descricao'] = max(available, key=lambda c: df[c].astype(str).str.len().mean())
-         except Exception: pass
-    available = [c for c in df.columns if c not in identified_cols.values()]
+        try:
+            mean_lengths = {col: df[col].astype(str).str.len().mean() for col in available}
+            if mean_lengths:
+                identified_cols['descricao'] = max(mean_lengths, key=mean_lengths.get)
+        except Exception: pass # Ignora erro
+
+    # Fallback para Valor (coluna com maior soma numérica)
+    available = [c for c in df.columns if c not in identified_cols.values()] # Atualiza disponíveis
     if 'valor' not in identified_cols and available:
-         best_val = None; max_s = -1
-         for col in available:
-              try: vals = df[col].apply(limpar_valor); s = vals.sum(); c = vals.count(); l = len(df)
-                   if s > max_s and c > l*0.1: max_s = s; best_val = col
-              except Exception: continue
-         if best_val: identified_cols['valor'] = best_val
-    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'), identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
+        best_val_col = None
+        max_s = -1
+        for col in available:
+            # *** CORREÇÃO DE INDENTAÇÃO APLICADA AQUI ***
+            try:
+                # Calcula soma, contagem de não nulos e total de linhas
+                vals = df[col].apply(limpar_valor)
+                s = vals.sum()
+                c = vals.count() # Conta valores não-nulos após limpeza
+                l = len(df)      # Total de linhas
+                # Condição: Soma maior que a máxima atual E contagem > 10% do total
+                if s > max_s and c > l * 0.1:
+                    max_s = s
+                    best_val_col = col
+            except Exception:
+                # Ignora coluna se houver erro no processamento/cálculo
+                continue
+        # Atribui a melhor coluna encontrada (se houver)
+        if best_val_col:
+            identified_cols['valor'] = best_val_col
+
+    # Retorna as colunas identificadas (pode ser None se não achou)
+    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'),
+            identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
+
 
 def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, col_cu=None, lim_a=80, lim_b=95):
     """Gera a curva ABC com todas as colunas necessárias."""
