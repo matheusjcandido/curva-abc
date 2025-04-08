@@ -134,29 +134,22 @@ def sanitizar_dataframe(df):
             col_dtype = df_clean[col].dtype
             if pd.api.types.is_numeric_dtype(col_dtype): continue
             converted_col = pd.to_numeric(df_clean[col], errors='coerce')
-            # Verifica se a conversão foi majoritariamente bem-sucedida
             if not converted_col.isnull().all() and converted_col.notnull().sum() / len(df_clean[col]) > 0.5:
                  df_clean[col] = converted_col
                  continue
-            # Se não converteu bem para numérico, tenta datetime
             if df_clean[col].dtype == 'object':
                  try:
                       converted_dt = pd.to_datetime(df_clean[col], errors='coerce')
-                      # Verifica se a conversão foi majoritariamente bem-sucedida
                       if not converted_dt.isnull().all() and converted_dt.notnull().sum() / len(df_clean[col]) > 0.5:
                            df_clean[col] = converted_dt
                            continue
-                 except Exception: pass # Ignora erro na conversão de data
-            # Se ainda for 'object' ou tiver tipos mistos, converte para string
+                 except Exception: pass
             if df_clean[col].dtype == 'object' or df_clean[col].apply(type).nunique() > 1:
                  df_clean[col] = df_clean[col].astype(str).replace('nan', '', regex=False).replace('NaT', '', regex=False)
-            # Remove caracteres nulos se for string
             if isinstance(df_clean[col].dtype, pd.StringDtype) or df_clean[col].dtype == 'object':
-                 # Garante que é string antes de usar métodos .str
                  if df_clean[col].apply(lambda x: isinstance(x, str)).any():
                       df_clean[col] = df_clean[col].astype(str).str.replace('\x00', '', regex=False)
         except Exception:
-            # Último recurso: tenta converter para string
             try: df_clean[col] = df_clean[col].astype(str)
             except Exception: st.error(f"Falha crítica ao converter coluna '{col}' para string.")
 
@@ -177,55 +170,36 @@ def processar_arquivo(uploaded_file):
         # --- Processamento Excel ---
         if file_name.endswith(('.xlsx', '.xls')):
             try:
-                # Usa pd.ExcelFile para acessar nomes das abas sem carregar tudo
                 excel_file = pd.ExcelFile(io.BytesIO(file_content))
                 sheet_names = excel_file.sheet_names
                 target_sheet_name = None
-                # Variações do nome da aba a procurar (case-insensitive, sem espaços/underscores)
-                target_variations = ['planilhasintetica', 'planilhasintética', 'sintetica', 'sintética', 'resumo'] # Adicionado 'resumo'
-
-                # Procura pela aba
+                target_variations = ['planilhasintetica', 'planilhasintética', 'sintetica', 'sintética', 'resumo']
                 for sheet in sheet_names:
                     normalized_name = re.sub(r'[\s_]', '', sheet).lower()
                     if normalized_name in target_variations:
-                        target_sheet_name = sheet # Guarda o nome original da aba encontrada
+                        target_sheet_name = sheet
                         st.info(f"Encontrada aba correspondente: '{target_sheet_name}'")
                         break
+                sheet_to_read = target_sheet_name if target_sheet_name is not None else sheet_names[0]
+                if target_sheet_name is None:
+                    st.warning(f"Nenhuma aba como 'Planilha Sintética' encontrada. Lendo a primeira aba: '{sheet_names[0]}'.")
 
-                # Se não encontrou, usa a primeira aba e avisa
-                sheet_to_read = 0 # Default para primeira aba (índice)
-                if target_sheet_name is not None:
-                    sheet_to_read = target_sheet_name # Usa o nome da aba encontrada
-                else:
-                    st.warning(f"Nenhuma aba como 'Planilha Sintética' (ou variações) encontrada. Lendo a primeira aba: '{sheet_names[0]}'.")
-                    sheet_to_read = sheet_names[0] # Usa o nome da primeira aba
-
-                # Determina o engine (tentativa) - pode não ser necessário com ExcelFile
                 engine_to_use = 'openpyxl' if file_name.endswith('.xlsx') else 'xlrd'
                 if engine_to_use == 'xlrd':
                      try: import xlrd
-                     except ImportError: st.warning("Engine 'xlrd' necessário para arquivos .xls antigos. Pode ser necessário instalar: pip install xlrd")
+                     except ImportError: st.warning("Engine 'xlrd' necessário para .xls. Instale: pip install xlrd")
 
-
-                # 1. Ler preview da aba correta para encontrar cabeçalho
                 try:
-                    df_preview = pd.read_excel(excel_file, sheet_name=sheet_to_read, nrows=25, header=None) # Engine implícito pelo ExcelFile
+                    df_preview = pd.read_excel(excel_file, sheet_name=sheet_to_read, nrows=25, header=None)
                     linha_cabecalho = encontrar_linha_cabecalho(df_preview)
                 except Exception as e_preview:
-                    st.warning(f"Não foi possível ler o preview da aba '{sheet_to_read}' para achar cabeçalho: {e_preview}. Assumindo linha 0.")
+                    st.warning(f"Erro preview aba '{sheet_to_read}': {e_preview}. Assumindo linha 0.")
                     linha_cabecalho = 0
-
-                # 2. Ler aba completa com o cabeçalho correto
-                df = pd.read_excel(excel_file, sheet_name=sheet_to_read, header=linha_cabecalho) # Engine implícito
-
-            except Exception as e_excel:
-                st.error(f"Erro ao processar arquivo Excel: {e_excel}")
-                return None, None
-
+                df = pd.read_excel(excel_file, sheet_name=sheet_to_read, header=linha_cabecalho)
+            except Exception as e_excel: st.error(f"Erro processar Excel: {e_excel}"); return None, None
         # --- Processamento CSV ---
         elif file_name.endswith('.csv'):
-            # (Lógica CSV mantida como estava)
-            detected_encoding = None; decoded_content = None
+            decoded_content = None; detected_encoding = None
             for enc in encodings_to_try:
                 try: decoded_content = file_content.decode(enc); detected_encoding = enc; break
                 except UnicodeDecodeError: continue
@@ -235,19 +209,16 @@ def processar_arquivo(uploaded_file):
             try: df_preview = pd.read_csv(io.StringIO(decoded_content), delimiter=delimitador, nrows=25, header=None, skipinitialspace=True, low_memory=False); linha_cabecalho = encontrar_linha_cabecalho(df_preview)
             except Exception: linha_cabecalho = 0
             df = pd.read_csv(io.StringIO(decoded_content), delimiter=delimitador, header=linha_cabecalho, encoding=detected_encoding, on_bad_lines='warn', skipinitialspace=True, low_memory=False)
-        else:
-            st.error("Formato de arquivo não suportado."); return None, None
-
-        # --- Pós-processamento Comum ---
+        else: st.error("Formato não suportado."); return None, None
+        # --- Pós-processamento ---
         if df is not None:
             df = df.dropna(how='all').dropna(axis=1, how='all')
             if df.empty: st.error("Arquivo/Aba vazio(a) após limpeza."); return None, delimitador
             df = sanitizar_dataframe(df)
             if df is None or df.empty: st.error("Falha sanitização."); return None, delimitador
             return df, delimitador
-        else: return None, delimitador # Caso df não tenha sido criado
-    except Exception as e: st.error(f"Erro fatal ao processar arquivo: {e}"); return None, None
-
+        else: return None, delimitador
+    except Exception as e: st.error(f"Erro fatal processar: {e}"); return None, None
 
 # --- Funções da Curva ABC (limpeza, identificação, geração) ---
 
@@ -285,8 +256,20 @@ def truncate(number, decimals=0):
 
 def identificar_colunas(df):
     """Identifica heuristicamente as colunas necessárias."""
-    identified_cols = {}; cols_lower_map = {str(col).lower().strip(): col for col in df.columns}; df_cols_list = list(df.columns)
-    exact_matches = {'codigo': ['código do serviço', 'código', 'codigo', 'cod.', 'item', 'ref'],'descricao': ['descrição do serviço', 'descrição', 'descricao', 'desc', 'especificação', 'serviço'],'valor': ['custo total', 'valor total', 'preço total', 'total', 'valor'],'unidade': ['unidade de medida', 'unid', 'unidade', 'und', 'um'],'quantidade': ['quantidade', 'quantidade total', 'quant', 'qtd', 'qtde'],'custo_unitario': ['custo unitário', 'preço unitário', 'valor unitário', 'custo unitario', 'preco unitario', 'valor unitario', 'unitário']}
+    identified_cols = {}
+    cols_lower_map = {str(col).lower().strip(): col for col in df.columns}
+    df_cols_list = list(df.columns)
+
+    exact_matches = {
+        'codigo': ['código do serviço', 'código', 'codigo', 'cod.', 'item', 'ref'],
+        'descricao': ['descrição do serviço', 'descrição', 'descricao', 'desc', 'especificação', 'serviço'],
+        'valor': ['custo total', 'valor total', 'preço total', 'total', 'valor'],
+        'unidade': ['unidade de medida', 'unid', 'unidade', 'und', 'um'],
+        'quantidade': ['quantidade', 'quantidade total', 'quant', 'qtd', 'qtde'],
+        'custo_unitario': ['custo unitário', 'preço unitário', 'valor unitário', 'custo unitario', 'preco unitario', 'valor unitario', 'unitário']
+    }
+
+    # Identificação por nomes exatos
     for target, patterns in exact_matches.items():
         if target in identified_cols: continue
         for pattern in patterns:
@@ -299,6 +282,8 @@ def identificar_colunas(df):
                          try: is_num_ok = pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
                          except Exception: pass
                     if is_num_ok: identified_cols[target] = col_original; break
+
+    # Heurística para Quantidade após Unidade
     if 'quantidade' not in identified_cols and 'unidade' in identified_cols:
         col_unidade_nome = identified_cols['unidade']
         try:
@@ -311,21 +296,47 @@ def identificar_colunas(df):
                     except Exception: pass
                     if is_num_ok: identified_cols['quantidade'] = col_seguinte
         except ValueError: pass
+
+    # Fallback para Descrição
     available = [c for c in df.columns if c not in identified_cols.values()]
     if 'descricao' not in identified_cols and available:
-         try: identified_cols['descricao'] = max(available, key=lambda c: df[c].astype(str).str.len().mean())
-         except Exception: pass
-    available = [c for c in df.columns if c not in identified_cols.values()]
+        try:
+            mean_lengths = {col: df[col].astype(str).str.len().mean() for col in available}
+            if mean_lengths: identified_cols['descricao'] = max(mean_lengths, key=mean_lengths.get)
+        except Exception: pass
+
+    # *** LÓGICA DE FALLBACK PARA VALOR REESTRUTURADA E COM INDENTAÇÃO CORRIGIDA ***
+    available = [c for c in df.columns if c not in identified_cols.values()] # Atualiza disponíveis
     if 'valor' not in identified_cols and available:
-        col_sums = {}
+        col_sums = {} # Dicionário para guardar somas das colunas válidas
+        # Calcula as somas primeiro
         for col in available:
-            try: vals = df[col].apply(limpar_valor); s = vals.sum(); c = vals.count(); l = len(df)
-                 if c > l * 0.1: col_sums[col] = s
-            except Exception: continue
-        if col_sums:
+            # Garante indentação com 4 espaços
+            try:
+                # Garante indentação com 4 espaços
+                vals = df[col].apply(limpar_valor)
+                s = vals.sum()
+                c = vals.count()
+                l = len(df)
+                # Considera a coluna válida se tiver mais de 10% de valores numéricos
+                if c > l * 0.1:
+                    col_sums[col] = s # Armazena a soma
+            except Exception:
+                # Ignora colunas que causam erro durante limpeza/soma
+                continue # Pula para a próxima coluna no loop
+
+        # Encontra a coluna com a maior soma entre as válidas
+        if col_sums: # Verifica se alguma coluna foi processada com sucesso
+            # Encontra a chave (nome da coluna) com o maior valor no dicionário col_sums
             best_val_col = max(col_sums, key=col_sums.get)
-            if col_sums[best_val_col] > 0: identified_cols['valor'] = best_val_col
-    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'), identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
+            # Garante que a soma máxima seja positiva antes de atribuir
+            if col_sums[best_val_col] > 0:
+                 identified_cols['valor'] = best_val_col
+            # else: Nenhuma coluna com soma positiva encontrada
+
+    # Retorna as colunas identificadas
+    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'),
+            identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
 
 
 def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, col_cu=None, lim_a=80, lim_b=95):
@@ -357,7 +368,6 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
 
         df_agg = df_work.groupby('codigo_str').agg(**agg_config).reset_index().rename(columns={'codigo_str': 'codigo'})
 
-        # Calcula Custo Total (Qtd * CU) se possível, ajustando para unidade '%' e valor do CU
         if can_calculate_total:
             def calculate_row_total(row):
                 qtd = row.get('quantidade', 0); cu = row.get('custo_unitario', 0)
