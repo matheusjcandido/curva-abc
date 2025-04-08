@@ -16,7 +16,7 @@ import xlsxwriter # Importado explicitamente para referência
 
 # Configuração da página
 st.set_page_config(
-    page_title="Gerador de Curva ABC",
+    page_title="Gerador de Curva ABC - SINAPI",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -74,8 +74,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Título principal
-st.title("📊 Gerador de Curva ABC")
-st.markdown("### Automatize a geração da Curva ABC a partir de planilhas sintéticas")
+st.title("📊 Gerador de Curva ABC - SINAPI")
+st.markdown("### Automatize a geração da Curva ABC a partir de planilhas sintéticas do SINAPI")
 
 # --- Funções Auxiliares ---
 
@@ -134,22 +134,29 @@ def sanitizar_dataframe(df):
             col_dtype = df_clean[col].dtype
             if pd.api.types.is_numeric_dtype(col_dtype): continue
             converted_col = pd.to_numeric(df_clean[col], errors='coerce')
+            # Verifica se a conversão foi majoritariamente bem-sucedida
             if not converted_col.isnull().all() and converted_col.notnull().sum() / len(df_clean[col]) > 0.5:
                  df_clean[col] = converted_col
                  continue
+            # Se não converteu bem para numérico, tenta datetime
             if df_clean[col].dtype == 'object':
                  try:
                       converted_dt = pd.to_datetime(df_clean[col], errors='coerce')
+                      # Verifica se a conversão foi majoritariamente bem-sucedida
                       if not converted_dt.isnull().all() and converted_dt.notnull().sum() / len(df_clean[col]) > 0.5:
                            df_clean[col] = converted_dt
                            continue
-                 except Exception: pass
+                 except Exception: pass # Ignora erro na conversão de data
+            # Se ainda for 'object' ou tiver tipos mistos, converte para string
             if df_clean[col].dtype == 'object' or df_clean[col].apply(type).nunique() > 1:
                  df_clean[col] = df_clean[col].astype(str).replace('nan', '', regex=False).replace('NaT', '', regex=False)
+            # Remove caracteres nulos se for string
             if isinstance(df_clean[col].dtype, pd.StringDtype) or df_clean[col].dtype == 'object':
+                 # Garante que é string antes de usar métodos .str
                  if df_clean[col].apply(lambda x: isinstance(x, str)).any():
-                      df_clean[col] = df_clean[col].str.replace('\x00', '', regex=False)
+                      df_clean[col] = df_clean[col].astype(str).str.replace('\x00', '', regex=False)
         except Exception:
+            # Último recurso: tenta converter para string
             try: df_clean[col] = df_clean[col].astype(str)
             except Exception: st.error(f"Falha crítica ao converter coluna '{col}' para string.")
 
@@ -159,20 +166,66 @@ def sanitizar_dataframe(df):
 # --- Função Principal de Processamento ---
 
 def processar_arquivo(uploaded_file):
-    """Carrega e processa o arquivo CSV ou Excel, identificando o cabeçalho."""
+    """Carrega e processa o arquivo CSV ou Excel, buscando a aba 'Sintética'."""
     df = None; delimitador = None; linha_cabecalho = 0
-    encodings_to_try = ['utf-8', 'latin1', 'cp1252']; engine_to_use = 'openpyxl'
+    encodings_to_try = ['utf-8', 'latin1', 'cp1252']
+
     try:
-        file_name = uploaded_file.name.lower(); file_content = uploaded_file.getvalue()
+        file_name = uploaded_file.name.lower()
+        file_content = uploaded_file.getvalue()
+
+        # --- Processamento Excel ---
         if file_name.endswith(('.xlsx', '.xls')):
-            try: df_preview = pd.read_excel(io.BytesIO(file_content), engine='openpyxl', nrows=25, header=None)
-            except Exception:
-                try: df_preview = pd.read_excel(io.BytesIO(file_content), engine='xlrd', nrows=25, header=None); engine_to_use = 'xlrd'
-                except Exception as e: st.error(f"Erro preview Excel: {e}"); return None, None
-            linha_cabecalho = encontrar_linha_cabecalho(df_preview)
-            df = pd.read_excel(io.BytesIO(file_content), engine=engine_to_use, header=linha_cabecalho)
+            try:
+                # Usa pd.ExcelFile para acessar nomes das abas sem carregar tudo
+                excel_file = pd.ExcelFile(io.BytesIO(file_content))
+                sheet_names = excel_file.sheet_names
+                target_sheet_name = None
+                # Variações do nome da aba a procurar (case-insensitive, sem espaços/underscores)
+                target_variations = ['planilhasintetica', 'planilhasintética', 'sintetica', 'sintética', 'resumo'] # Adicionado 'resumo'
+
+                # Procura pela aba
+                for sheet in sheet_names:
+                    normalized_name = re.sub(r'[\s_]', '', sheet).lower()
+                    if normalized_name in target_variations:
+                        target_sheet_name = sheet # Guarda o nome original da aba encontrada
+                        st.info(f"Encontrada aba correspondente: '{target_sheet_name}'")
+                        break
+
+                # Se não encontrou, usa a primeira aba e avisa
+                sheet_to_read = 0 # Default para primeira aba (índice)
+                if target_sheet_name is not None:
+                    sheet_to_read = target_sheet_name # Usa o nome da aba encontrada
+                else:
+                    st.warning(f"Nenhuma aba como 'Planilha Sintética' (ou variações) encontrada. Lendo a primeira aba: '{sheet_names[0]}'.")
+                    sheet_to_read = sheet_names[0] # Usa o nome da primeira aba
+
+                # Determina o engine (tentativa) - pode não ser necessário com ExcelFile
+                engine_to_use = 'openpyxl' if file_name.endswith('.xlsx') else 'xlrd'
+                if engine_to_use == 'xlrd':
+                     try: import xlrd
+                     except ImportError: st.warning("Engine 'xlrd' necessário para arquivos .xls antigos. Pode ser necessário instalar: pip install xlrd")
+
+
+                # 1. Ler preview da aba correta para encontrar cabeçalho
+                try:
+                    df_preview = pd.read_excel(excel_file, sheet_name=sheet_to_read, nrows=25, header=None) # Engine implícito pelo ExcelFile
+                    linha_cabecalho = encontrar_linha_cabecalho(df_preview)
+                except Exception as e_preview:
+                    st.warning(f"Não foi possível ler o preview da aba '{sheet_to_read}' para achar cabeçalho: {e_preview}. Assumindo linha 0.")
+                    linha_cabecalho = 0
+
+                # 2. Ler aba completa com o cabeçalho correto
+                df = pd.read_excel(excel_file, sheet_name=sheet_to_read, header=linha_cabecalho) # Engine implícito
+
+            except Exception as e_excel:
+                st.error(f"Erro ao processar arquivo Excel: {e_excel}")
+                return None, None
+
+        # --- Processamento CSV ---
         elif file_name.endswith('.csv'):
-            decoded_content = None; detected_encoding = None
+            # (Lógica CSV mantida como estava)
+            detected_encoding = None; decoded_content = None
             for enc in encodings_to_try:
                 try: decoded_content = file_content.decode(enc); detected_encoding = enc; break
                 except UnicodeDecodeError: continue
@@ -182,16 +235,19 @@ def processar_arquivo(uploaded_file):
             try: df_preview = pd.read_csv(io.StringIO(decoded_content), delimiter=delimitador, nrows=25, header=None, skipinitialspace=True, low_memory=False); linha_cabecalho = encontrar_linha_cabecalho(df_preview)
             except Exception: linha_cabecalho = 0
             df = pd.read_csv(io.StringIO(decoded_content), delimiter=delimitador, header=linha_cabecalho, encoding=detected_encoding, on_bad_lines='warn', skipinitialspace=True, low_memory=False)
-        else: st.error("Formato não suportado."); return None, None
+        else:
+            st.error("Formato de arquivo não suportado."); return None, None
+
+        # --- Pós-processamento Comum ---
         if df is not None:
             df = df.dropna(how='all').dropna(axis=1, how='all')
-            if df.empty: st.error("Arquivo vazio após limpeza."); return None, delimitador
+            if df.empty: st.error("Arquivo/Aba vazio(a) após limpeza."); return None, delimitador
             df = sanitizar_dataframe(df)
             if df is None or df.empty: st.error("Falha sanitização."); return None, delimitador
             return df, delimitador
-        else: return None, delimitador
-    except Exception as e: st.error(f"Erro fatal processar: {e}"); # with st.expander("Detalhes"): st.text(traceback.format_exc())
-    return None, None
+        else: return None, delimitador # Caso df não tenha sido criado
+    except Exception as e: st.error(f"Erro fatal ao processar arquivo: {e}"); return None, None
+
 
 # --- Funções da Curva ABC (limpeza, identificação, geração) ---
 
@@ -263,9 +319,8 @@ def identificar_colunas(df):
     if 'valor' not in identified_cols and available:
         col_sums = {}
         for col in available:
-            try:
-                vals = df[col].apply(limpar_valor); s = vals.sum(); c = vals.count(); l = len(df)
-                if c > l * 0.1: col_sums[col] = s
+            try: vals = df[col].apply(limpar_valor); s = vals.sum(); c = vals.count(); l = len(df)
+                 if c > l * 0.1: col_sums[col] = s
             except Exception: continue
         if col_sums:
             best_val_col = max(col_sums, key=col_sums.get)
@@ -304,27 +359,15 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
 
         # Calcula Custo Total (Qtd * CU) se possível, ajustando para unidade '%' e valor do CU
         if can_calculate_total:
-            # *** AJUSTE CÁLCULO % BASEADO NO VALOR DO CU ***
             def calculate_row_total(row):
-                qtd = row.get('quantidade', 0)
-                cu = row.get('custo_unitario', 0)
+                qtd = row.get('quantidade', 0); cu = row.get('custo_unitario', 0)
                 unit = str(row.get('unidade', '')).strip() if 'unidade' in df_agg.columns else ''
-
                 if not (isinstance(qtd, (int, float, np.number)) and pd.notna(qtd)): qtd = 0.0
                 if not (isinstance(cu, (int, float, np.number)) and pd.notna(cu)): cu = 0.0
-
                 if unit == '%':
-                    # Verifica o valor do Custo Unitário
-                    if cu < 500:
-                        # CU < 500: Assume CU é por ponto percentual. Não divide Qtd.
-                        return float(qtd) * float(cu)
-                    else:
-                        # CU >= 500: Assume CU é valor total para 100%. Divide Qtd por 100.
-                        return (float(qtd) / 100.0) * float(cu)
-                else:
-                    # Unidade não é '%', cálculo padrão
-                    return float(qtd) * float(cu)
-
+                    if cu < 500: return float(qtd) * float(cu)
+                    else: return (float(qtd) / 100.0) * float(cu)
+                else: return float(qtd) * float(cu)
             df_agg['valor_calc'] = df_agg.apply(calculate_row_total, axis=1)
             df_agg['valor'] = df_agg['valor_calc'].apply(lambda x: truncate(x, 2))
             df_agg = df_agg[df_agg['valor'] > 0]
@@ -434,10 +477,10 @@ with st.sidebar:
     lim_a = st.slider("Limite A (%)", 50, 95, st.session_state.limite_a, 1, key='lim_a_sld')
     lim_b_min = lim_a + 1; lim_b = st.slider("Limite B (%)", lim_b_min, 99, max(st.session_state.limite_b, lim_b_min), 1, key='lim_b_sld')
     st.session_state.limite_a, st.session_state.limite_b = lim_a, lim_b
-    st.markdown("---"); st.subheader("ℹ️ Sobre"); st.info("Gera Curvas ABC. v1.11"); st.markdown("---"); st.caption(f"© {datetime.now().year}")
+    st.markdown("---"); st.subheader("ℹ️ Sobre"); st.info("Gera Curvas ABC. v1.13"); st.markdown("---"); st.caption(f"© {datetime.now().year}")
 
 # Conteúdo Principal
-st.markdown('<div class="highlight">', unsafe_allow_html=True); st.markdown("#### Como usar:\n1. Faça o upload da aba de planilha sintética.\n2. **Confirme Colunas**.\n3. Ajuste **Limites**.\n4. Clique **Gerar**.\n5. **Analise/Baixe**."); st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('<div class="highlight">', unsafe_allow_html=True); st.markdown("#### Como usar:\n1. **Upload**.\n2. **Confirme Colunas**.\n3. Ajuste **Limites**.\n4. Clique **Gerar**.\n5. **Analise/Baixe**."); st.markdown('</div>', unsafe_allow_html=True)
 
 # Upload
 uploaded_file = st.file_uploader("📂 Selecione a planilha", type=["csv", "xlsx", "xls"], key="file_uploader")
@@ -477,23 +520,23 @@ if st.session_state.df_processed is not None:
     r1c1, r1c2, r1c3 = st.columns(3); r2c1, r2c2, r2c3 = st.columns(3)
     with r1c1: st.selectbox("Código*", available_cols, index=get_idx(st.session_state.col_codigo), key='sel_cod')
     with r1c2: st.selectbox("Descrição*", available_cols, index=get_idx(st.session_state.col_descricao), key='sel_desc')
-    with r1c3: st.selectbox("Valor Total*", available_cols, index=get_idx(st.session_state.col_valor), key='sel_val') # Ainda pede o Valor Total original (usado como fallback)
+    with r1c3: st.selectbox("Valor Total*", available_cols, index=get_idx(st.session_state.col_valor), key='sel_val') # Usado como fallback
     with r2c1: st.selectbox("Unidade", available_cols, index=get_idx(st.session_state.col_unidade), key='sel_un')
-    with r2c2: st.selectbox("Quantidade", available_cols, index=get_idx(st.session_state.col_quantidade), key='sel_qtd') # Usará heurística se identificada
+    with r2c2: st.selectbox("Quantidade", available_cols, index=get_idx(st.session_state.col_quantidade), key='sel_qtd')
     with r2c3: st.selectbox("Custo Unitário", available_cols, index=get_idx(st.session_state.col_custo_unitario), key='sel_cu')
 
-    cols_ok = st.session_state.sel_cod and st.session_state.sel_desc and st.session_state.sel_val # Validação ainda usa valor original
+    cols_ok = st.session_state.sel_cod and st.session_state.sel_desc and st.session_state.sel_val
     if not cols_ok: st.warning("Selecione colunas obrigatórias (*).")
     if cols_ok and not (st.session_state.sel_qtd and st.session_state.sel_cu):
-         st.info("Se as colunas 'Quantidade' e 'Custo Unitário' não forem selecionadas, o 'Valor Total' original será usado para a curva ABC.")
+         st.info("Se 'Quantidade' e 'Custo Unitário' não forem selecionados, o 'Valor Total' original será usado.")
 
 
     if st.button("🚀 Gerar Curva ABC", key="gen_btn", disabled=not cols_ok):
         with st.spinner('Gerando...'):
             res, v_tot, df_curve_with_pos = gerar_curva_abc(
                 df,
-                st.session_state.sel_cod, st.session_state.sel_desc, st.session_state.sel_val, # Passa o valor original aqui
-                st.session_state.sel_un, st.session_state.sel_qtd, st.session_state.sel_cu, # Passa Qtd e CU para cálculo interno
+                st.session_state.sel_cod, st.session_state.sel_desc, st.session_state.sel_val,
+                st.session_state.sel_un, st.session_state.sel_qtd, st.session_state.sel_cu,
                 st.session_state.limite_a, st.session_state.limite_b
             )
             if res is not None:
@@ -512,9 +555,9 @@ if st.session_state.curva_gerada and st.session_state.curva_abc is not None:
 
     # Resumo
     st.subheader("📊 Resumo"); stats_cols = st.columns(4)
-    classes_count = resultado_final['classificacao'].value_counts().to_dict(); val_classe = resultado_final.groupby('classificacao')['valor'].sum().to_dict() # 'valor' aqui é o calculado/truncado
+    classes_count = resultado_final['classificacao'].value_counts().to_dict(); val_classe = resultado_final.groupby('classificacao')['valor'].sum().to_dict()
     with stats_cols[0]: st.metric("Itens", f"{len(resultado_final):,}")
-    with stats_cols[1]: st.metric("Valor Total", f"R$ {valor_total_final:,.2f}") # v_total agora é baseado no valor calculado/truncado
+    with stats_cols[1]: st.metric("Valor Total", f"R$ {valor_total_final:,.2f}")
     count_a = classes_count.get('A', 0); perc_ca = (count_a/len(resultado_final)*100) if len(resultado_final) else 0
     with stats_cols[2]: st.metric("Itens A", f"{count_a} ({perc_ca:.1f}%)")
     val_a = val_classe.get('A', 0); perc_va = (val_a/valor_total_final*100) if valor_total_final else 0
