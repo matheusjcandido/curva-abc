@@ -173,7 +173,7 @@ def processar_arquivo(uploaded_file):
                 excel_file = pd.ExcelFile(io.BytesIO(file_content))
                 sheet_names = excel_file.sheet_names
                 target_sheet_name = None
-                target_variations = ['planilhasintetica', 'planilhasintética', 'sintetica', 'sintética', 'planilha_sintética', 'planilha_sintetica', 'planilha_sintética form ok']
+                target_variations = ['planilhasintetica', 'planilhasintética', 'sintetica', 'sintética', 'planilha_sintética', 'planilha_sintetica', 'PLANILHA_SINTÉTICA FORM OK']
                 for sheet in sheet_names:
                     normalized_name = re.sub(r'[\s_]', '', sheet).lower()
                     if normalized_name in target_variations:
