@@ -787,7 +787,7 @@ if st.session_state.curva_gerada and st.session_state.curva_abc is not None:
         classe_filtro = st.multiselect("Filtrar Classe", options=sorted(resultado_final['classificacao'].unique()), default=sorted(resultado_final['classificacao'].unique()), key='filter_classe')
     with filter_cols[1]:
         busca = st.text_input("Buscar Código/Descrição", key='search_term')
-
+ 
     # Filtra o DataFrame original (numérico)
     df_filtrado_orig = resultado_final[resultado_final['classificacao'].isin(classe_filtro)]
     if busca:
