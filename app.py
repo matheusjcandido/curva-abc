@@ -201,18 +201,45 @@ def limpar_valor(valor):
     s = str(valor).strip(); s = re.sub(r'[R$€£¥\s]', '', s)
     if ',' in s and '.' in s: s = s.replace('.', '', s.count('.') - 1).replace(',', '.') if s.rfind(',') > s.rfind('.') else s.replace(',', '')
     elif ',' in s: s = s.replace(',', '.')
-    s = re.sub(r'[^\d.]', '', s); try: return float(s) if s else 0.0
-    except ValueError: return 0.0
+    s = re.sub(r'[^\d.]', '', s)
+    try:
+        # Return float(s) if s is not empty, otherwise 0.0
+        return float(s) if s else 0.0
+    except ValueError:
+        # Return 0.0 if conversion fails
+        return 0.0
 
 def limpar_quantidade(qtd):
     """Limpa e converte valores de quantidade para float."""
-    if pd.isna(qtd): return 0.0
-    if isinstance(qtd, (int, float, np.number)): return float(qtd)
-    s = str(qtd).strip(); s = re.sub(r'[\s]', '', s)
-    if ',' in s and '.' in s: s = s.replace('.', '', s.count('.') - 1).replace(',', '.') if s.rfind(',') > s.rfind('.') else s.replace(',', '')
-    elif ',' in s: s = s.replace(',', '.')
-    s = re.sub(r'[^\d.]', '', s); try: return float(s) if s else 0.0
-    except ValueError: return 0.0
+    if pd.isna(qtd):
+        return 0.0
+    if isinstance(qtd, (int, float, np.number)):
+        return float(qtd)
+    s = str(qtd).strip()
+    if not s:
+        return 0.0
+    # Remove espaços, mas mantém . e ,
+    s = re.sub(r'[\s]', '', s)
+    # Lógica de separador decimal (igual a limpar_valor)
+    has_comma = ',' in s
+    has_dot = '.' in s
+    if has_comma and has_dot:
+        last_comma_pos = s.rfind(',')
+        last_dot_pos = s.rfind('.')
+        if last_comma_pos > last_dot_pos:
+            s = s.replace('.', '').replace(',', '.')
+        else:
+            s = s.replace(',', '')
+    elif has_comma:
+        s = s.replace(',', '.')
+    # Remove não numéricos exceto ponto
+    s = re.sub(r'[^\d.]', '', s)
+    try:
+        # Return float(s) if s is not empty, otherwise 0.0
+        return float(s) if s else 0.0
+    except ValueError:
+        # Return 0.0 if conversion fails
+        return 0.0
 
 def identificar_colunas(df):
     """Identifica heuristicamente as colunas necessárias."""
@@ -480,4 +507,3 @@ if st.session_state.curva_gerada and st.session_state.curva_abc is not None:
 
 # Rodapé
 st.markdown('<div class="footer">', unsafe_allow_html=True); st.markdown(f"© {datetime.now().year} - Gerador Curva ABC"); st.markdown('</div>', unsafe_allow_html=True)
-
