@@ -263,8 +263,9 @@ def identificar_colunas(df):
     if 'valor' not in identified_cols and available:
         col_sums = {}
         for col in available:
-            try: vals = df[col].apply(limpar_valor); s = vals.sum(); c = vals.count(); l = len(df)
-                 if c > l * 0.1: col_sums[col] = s
+            try:
+                vals = df[col].apply(limpar_valor); s = vals.sum(); c = vals.count(); l = len(df)
+                if c > l * 0.1: col_sums[col] = s
             except Exception: continue
         if col_sums:
             best_val_col = max(col_sums, key=col_sums.get)
@@ -279,7 +280,6 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
     optional = {'unidade': col_un, 'quantidade': col_qtd, 'custo_unitario': col_cu}
     cols_to_use = list(essential.values()) + [c for c in optional.values() if c and c in df.columns]
     valid_optional = {k: v for k, v in optional.items() if v and v in df.columns}
-    # Verifica se Qtd e CU estão disponíveis para cálculo
     can_calculate_total = 'quantidade' in valid_optional and 'custo_unitario' in valid_optional
     unit_col_present = 'unidade' in valid_optional
 
@@ -293,7 +293,7 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
         if 'custo_unitario' in valid_optional: df_work['custo_unitario_num'] = df_work[valid_optional['custo_unitario']].apply(limpar_valor)
 
         df_work = df_work[(df_work['valor_original_num'] > 0) & (df_work['codigo_str'] != '')]
-        if df_work.empty: st.error("Nenhum item válido encontrado (valor original > 0)."); return None, 0, None
+        if df_work.empty: st.error("Nenhum item válido encontrado (valor > 0)."); return None, 0, None
 
         agg_config = {'descricao': ('descricao_str', 'first'), 'valor_original_sum': ('valor_original_num', 'sum')}
         if unit_col_present: agg_config['unidade'] = ('unidade_str', 'first')
@@ -304,13 +304,12 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
 
         # Calcula Custo Total (Qtd * CU) se possível, ajustando para unidade '%' e valor do CU
         if can_calculate_total:
-            # *** AJUSTE CÁLCULO % BASEADO NO VALOR DO CU (REVERTIDO AO ANTERIOR) ***
+            # *** AJUSTE CÁLCULO % BASEADO NO VALOR DO CU ***
             def calculate_row_total(row):
                 qtd = row.get('quantidade', 0)
                 cu = row.get('custo_unitario', 0)
                 unit = str(row.get('unidade', '')).strip() if 'unidade' in df_agg.columns else ''
 
-                # Garante que qtd e cu sejam numéricos válidos
                 if not (isinstance(qtd, (int, float, np.number)) and pd.notna(qtd)): qtd = 0.0
                 if not (isinstance(cu, (int, float, np.number)) and pd.notna(cu)): cu = 0.0
 
@@ -328,25 +327,19 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
 
             df_agg['valor_calc'] = df_agg.apply(calculate_row_total, axis=1)
             df_agg['valor'] = df_agg['valor_calc'].apply(lambda x: truncate(x, 2))
-            df_agg = df_agg[df_agg['valor'] > 0] # Filtra após truncar
+            df_agg = df_agg[df_agg['valor'] > 0]
             if df_agg.empty: st.error("Nenhum item com Custo Total calculado > 0."); return None, 0, None
-            df_agg = df_agg.drop(columns=['valor_calc']) # Remove coluna intermediária
+            df_agg = df_agg.drop(columns=['valor_calc'])
         else:
-            # Fallback: Usa a soma do valor original se não puder calcular
-            st.warning("Colunas 'Quantidade' e/ou 'Custo Unitário' não selecionadas ou inválidas. Usando o 'Valor Total' original para a curva ABC.")
+            st.warning("Usando o 'Valor Total' original para a curva ABC.")
             df_agg['valor'] = df_agg['valor_original_sum']
             df_agg = df_agg[df_agg['valor'] > 0]
             if df_agg.empty: st.error("Nenhum item com Valor Total original > 0."); return None, 0, None
+        if 'valor_original_sum' in df_agg.columns: df_agg = df_agg.drop(columns=['valor_original_sum'])
 
-        # Remove coluna temporária do valor original somado, se existir
-        if 'valor_original_sum' in df_agg.columns:
-            df_agg = df_agg.drop(columns=['valor_original_sum'])
-
-        # Recalcula v_total com base no 'valor' final
         v_total = df_agg['valor'].sum()
         if v_total <= 0: st.error("Valor total final é zero ou negativo."); return None, 0, None
 
-        # Continua com cálculos da curva ABC
         df_curve = df_agg.sort_values('valor', ascending=False).reset_index(drop=True)
         df_curve['percentual'] = (df_curve['valor'] / v_total * 100)
         df_curve['percentual_acumulado'] = df_curve['percentual'].cumsum()
@@ -354,7 +347,6 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
         df_curve['classificacao'] = df_curve['percentual_acumulado'].apply(lambda p: 'A' if p <= lim_a + 1e-9 else ('B' if p <= lim_b + 1e-9 else 'C'))
         df_curve['posicao'] = range(1, len(df_curve) + 1)
 
-        # Ordem das colunas internas (sem 'posicao')
         final_cols_internal = ['codigo', 'descricao']
         if 'unidade' in df_curve.columns: final_cols_internal.append('unidade')
         if 'quantidade' in df_curve.columns: final_cols_internal.append('quantidade')
@@ -442,7 +434,7 @@ with st.sidebar:
     lim_a = st.slider("Limite A (%)", 50, 95, st.session_state.limite_a, 1, key='lim_a_sld')
     lim_b_min = lim_a + 1; lim_b = st.slider("Limite B (%)", lim_b_min, 99, max(st.session_state.limite_b, lim_b_min), 1, key='lim_b_sld')
     st.session_state.limite_a, st.session_state.limite_b = lim_a, lim_b
-    st.markdown("---"); st.subheader("ℹ️ Sobre"); st.info("Gera Curvas ABC. v1.13"); st.markdown("---"); st.caption(f"© {datetime.now().year}")
+    st.markdown("---"); st.subheader("ℹ️ Sobre"); st.info("Gera Curvas ABC. v1.11"); st.markdown("---"); st.caption(f"© {datetime.now().year}")
 
 # Conteúdo Principal
 st.markdown('<div class="highlight">', unsafe_allow_html=True); st.markdown("#### Como usar:\n1. **Upload**.\n2. **Confirme Colunas**.\n3. Ajuste **Limites**.\n4. Clique **Gerar**.\n5. **Analise/Baixe**."); st.markdown('</div>', unsafe_allow_html=True)
@@ -485,26 +477,23 @@ if st.session_state.df_processed is not None:
     r1c1, r1c2, r1c3 = st.columns(3); r2c1, r2c2, r2c3 = st.columns(3)
     with r1c1: st.selectbox("Código*", available_cols, index=get_idx(st.session_state.col_codigo), key='sel_cod')
     with r1c2: st.selectbox("Descrição*", available_cols, index=get_idx(st.session_state.col_descricao), key='sel_desc')
-    with r1c3: st.selectbox("Valor Total*", available_cols, index=get_idx(st.session_state.col_valor), key='sel_val') # Usado como fallback
+    with r1c3: st.selectbox("Valor Total*", available_cols, index=get_idx(st.session_state.col_valor), key='sel_val') # Ainda pede o Valor Total original (usado como fallback)
     with r2c1: st.selectbox("Unidade", available_cols, index=get_idx(st.session_state.col_unidade), key='sel_un')
-    with r2c2: st.selectbox("Quantidade", available_cols, index=get_idx(st.session_state.col_quantidade), key='sel_qtd')
+    with r2c2: st.selectbox("Quantidade", available_cols, index=get_idx(st.session_state.col_quantidade), key='sel_qtd') # Usará heurística se identificada
     with r2c3: st.selectbox("Custo Unitário", available_cols, index=get_idx(st.session_state.col_custo_unitario), key='sel_cu')
 
-    cols_ok = st.session_state.sel_cod and st.session_state.sel_desc and st.session_state.sel_val
+    cols_ok = st.session_state.sel_cod and st.session_state.sel_desc and st.session_state.sel_val # Validação ainda usa valor original
     if not cols_ok: st.warning("Selecione colunas obrigatórias (*).")
-    # Mensagem informativa sobre o cálculo
     if cols_ok and not (st.session_state.sel_qtd and st.session_state.sel_cu):
-         st.info("Se 'Quantidade' e 'Custo Unitário' não forem selecionados, o 'Valor Total' original será usado.")
-    elif cols_ok and (st.session_state.sel_qtd and st.session_state.sel_cu):
-         st.info("Para itens com unidade '%', o cálculo do Custo Total usará a regra do valor do Custo Unitário (<500 ou >=500). Para outros, será Qtd * Custo Unitário (truncado).")
+         st.info("Se as colunas 'Quantidade' e 'Custo Unitário' não forem selecionadas, o 'Valor Total' original será usado para a curva ABC.")
 
 
     if st.button("🚀 Gerar Curva ABC", key="gen_btn", disabled=not cols_ok):
         with st.spinner('Gerando...'):
             res, v_tot, df_curve_with_pos = gerar_curva_abc(
                 df,
-                st.session_state.sel_cod, st.session_state.sel_desc, st.session_state.sel_val,
-                st.session_state.sel_un, st.session_state.sel_qtd, st.session_state.sel_cu,
+                st.session_state.sel_cod, st.session_state.sel_desc, st.session_state.sel_val, # Passa o valor original aqui
+                st.session_state.sel_un, st.session_state.sel_qtd, st.session_state.sel_cu, # Passa Qtd e CU para cálculo interno
                 st.session_state.limite_a, st.session_state.limite_b
             )
             if res is not None:
@@ -523,9 +512,9 @@ if st.session_state.curva_gerada and st.session_state.curva_abc is not None:
 
     # Resumo
     st.subheader("📊 Resumo"); stats_cols = st.columns(4)
-    classes_count = resultado_final['classificacao'].value_counts().to_dict(); val_classe = resultado_final.groupby('classificacao')['valor'].sum().to_dict()
+    classes_count = resultado_final['classificacao'].value_counts().to_dict(); val_classe = resultado_final.groupby('classificacao')['valor'].sum().to_dict() # 'valor' aqui é o calculado/truncado
     with stats_cols[0]: st.metric("Itens", f"{len(resultado_final):,}")
-    with stats_cols[1]: st.metric("Valor Total", f"R$ {valor_total_final:,.2f}")
+    with stats_cols[1]: st.metric("Valor Total", f"R$ {valor_total_final:,.2f}") # v_total agora é baseado no valor calculado/truncado
     count_a = classes_count.get('A', 0); perc_ca = (count_a/len(resultado_final)*100) if len(resultado_final) else 0
     with stats_cols[2]: st.metric("Itens A", f"{count_a} ({perc_ca:.1f}%)")
     val_a = val_classe.get('A', 0); perc_va = (val_a/valor_total_final*100) if valor_total_final else 0
