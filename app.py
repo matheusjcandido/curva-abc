@@ -96,6 +96,8 @@ def processar_arquivo(uploaded_file, encoding='utf-8'):
             cabecalhos = df.iloc[linha_cabecalho].values
             df = pd.DataFrame(df.values[linha_cabecalho+1:], columns=cabecalhos)
             
+            # Limpeza e sanitização do DataFrame
+            df = sanitizar_dataframe(df)
             return df, None
         
         # Para arquivos CSV
@@ -130,6 +132,9 @@ def processar_arquivo(uploaded_file, encoding='utf-8'):
         # Limpar dados
         df = df.dropna(how='all').dropna(axis=1, how='all')
         
+        # Sanitizar o DataFrame para evitar problemas com PyArrow/Streamlit
+        df = sanitizar_dataframe(df)
+        
         return df, delimitador
     except UnicodeDecodeError:
         # Tentar com encoding alternativo se utf-8 falhar
@@ -142,7 +147,43 @@ def processar_arquivo(uploaded_file, encoding='utf-8'):
             return None, None
     except Exception as e:
         st.error(f"Erro ao processar o arquivo: {str(e)}")
+        import traceback
+        with st.expander("Detalhes do erro"):
+            st.text(traceback.format_exc())
         return None, None
+
+# Função para sanitizar o DataFrame e garantir compatibilidade com PyArrow/Streamlit
+def sanitizar_dataframe(df):
+    """Sanitiza o DataFrame para garantir compatibilidade com PyArrow/Streamlit."""
+    if df is None:
+        return None
+    
+    # Cria uma cópia para evitar modificar o original
+    df_clean = df.copy()
+    
+    # Converte tipos problemáticos para string para evitar erros PyArrow
+    for col in df_clean.columns:
+        try:
+            # Verifica se a coluna tem tipos mistos
+            if df_clean[col].apply(type).nunique() > 1:
+                df_clean[col] = df_clean[col].astype(str)
+            
+            # Converte coluna de objetos para string
+            if df_clean[col].dtype == 'object':
+                df_clean[col] = df_clean[col].astype(str)
+        except:
+            # Em caso de erro, converte para string
+            df_clean[col] = df_clean[col].astype(str)
+    
+    # Garante que os nomes das colunas sejam strings
+    df_clean.columns = df_clean.columns.astype(str)
+    
+    # Remove caracteres nulos que podem causar problemas
+    for col in df_clean.columns:
+        if df_clean[col].dtype == 'object' or df_clean[col].dtype == 'string':
+            df_clean[col] = df_clean[col].str.replace('\0', '', regex=False)
+    
+    return df_clean
 
 # Função para limpar e converter valores numéricos
 def limpar_valor(valor_str):
@@ -573,7 +614,14 @@ if uploaded_file is not None:
             
             # Amostra dos dados
             with st.expander("Visualizar amostra dos dados"):
-                st.dataframe(df.head(10))
+                try:
+                    st.dataframe(df.head(10))
+                except Exception as e:
+                    st.warning("Não foi possível exibir os dados em formato tabular devido a um erro de compatibilidade.")
+                    st.text("Visualização alternativa dos dados:")
+                    # Exibe como texto alternativo
+                    for i, row in df.head(10).iterrows():
+                        st.text(f"Linha {i+1}: {dict(row)}")
             
             # Identificar colunas
             col_codigo, col_descricao, col_valor = identificar_colunas(df)
@@ -619,14 +667,22 @@ if uploaded_file is not None:
                 if df is not None:
                     st.write("**Amostra de valores das colunas selecionadas:**")
                     try:
-                        sample_data = pd.DataFrame({
-                            'Código': df[col_codigo_selecionada].head(5),
-                            'Descrição': df[col_descricao_selecionada].head(5),
-                            'Valor': df[col_valor_selecionada].head(5)
-                        })
-                        st.dataframe(sample_data)
+                        # Cria um dicionário de valores para exibir
+                        amostra = {
+                            'Código': df[col_codigo_selecionada].head(5).tolist(),
+                            'Descrição': df[col_descricao_selecionada].head(5).tolist(),
+                            'Valor': df[col_valor_selecionada].head(5).tolist()
+                        }
+                        
+                        # Exibe como tabela Markdown em vez de dataframe
+                        st.markdown("| Código | Descrição | Valor |")
+                        st.markdown("|--------|-----------|-------|")
+                        for i in range(min(5, len(amostra['Código']))):
+                            st.markdown(f"| {amostra['Código'][i]} | {amostra['Descrição'][i]} | {amostra['Valor'][i]} |")
                     except Exception as e:
                         st.error(f"Erro ao mostrar amostra: {str(e)}")
+                        import traceback
+                        st.text(traceback.format_exc())
             
             # Botão para gerar a curva ABC
             if st.button("Gerar Curva ABC", key="gerar_btn"):
@@ -713,7 +769,19 @@ if 'curva_gerada' in st.session_state and st.session_state['curva_gerada']:
         ]
     
     # Exibir tabela
-    st.dataframe(df_filtrado, height=400)
+    try:
+        st.dataframe(df_filtrado, height=400)
+    except Exception as e:
+        st.warning("Não foi possível exibir a tabela completa devido a um erro de compatibilidade.")
+        st.write("Resumo dos resultados:")
+        
+        # Exibe estatísticas em vez da tabela completa
+        st.write(f"Total de itens: {len(df_filtrado)}")
+        
+        # Exibe os primeiros 10 itens em formato de texto
+        st.write("Primeiros 10 itens:")
+        for i, row in df_filtrado.head(10).iterrows():
+            st.write(f"**{row['Código']}** - {row['Descrição'][:50]}... - R$ {row['Valor (R$)']}")
     
     # Links para download
     st.subheader("Downloads")
