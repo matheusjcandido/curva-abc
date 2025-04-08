@@ -69,25 +69,63 @@ def detectar_delimitador(content):
     
     return max(contagem, key=contagem.get)
 
+# Função para encontrar a linha de cabeçalho
+def encontrar_linha_cabecalho(df):
+    """Encontra a linha que contém os cabeçalhos da tabela."""
+    cabecalhos_possiveis = ['CÓDIGO', 'ITEM', 'DESCRIÇÃO', 'CUSTO TOTAL', 'VALOR TOTAL']
+    
+    for i in range(min(15, len(df))):  # Verifica as primeiras 15 linhas
+        row = df.iloc[i]
+        row_text = ' '.join([str(x).upper() for x in row.values])
+        
+        if any(cabecalho in row_text for cabecalho in cabecalhos_possiveis):
+            return i
+    
+    return 0  # Se não encontrar, assume a primeira linha
+
 # Função para carregar e processar o arquivo CSV
 def processar_arquivo(uploaded_file, encoding='utf-8'):
     """Carrega e processa o arquivo CSV."""
     try:
+        # Para arquivos Excel
+        if uploaded_file.name.lower().endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(uploaded_file, engine='openpyxl')
+            linha_cabecalho = encontrar_linha_cabecalho(df)
+            
+            # Define a linha de cabeçalho e reindexa o DataFrame
+            cabecalhos = df.iloc[linha_cabecalho].values
+            df = pd.DataFrame(df.values[linha_cabecalho+1:], columns=cabecalhos)
+            
+            return df, None
+        
+        # Para arquivos CSV
         # Ler o conteúdo do arquivo
         content = uploaded_file.getvalue().decode(encoding)
+        
+        # Verificar se o arquivo está vazio
+        if content.strip() == '':
+            st.error("O arquivo enviado está vazio. Por favor, verifique o arquivo e tente novamente.")
+            return None, None
         
         # Detectar o delimitador
         delimitador = detectar_delimitador(content)
         
-        # Carregar o CSV
+        # Carregar o CSV sem cabeçalhos inicialmente
         df = pd.read_csv(
             io.StringIO(content),
             delimiter=delimitador,
             encoding=encoding,
-            error_bad_lines=False,
-            warn_bad_lines=True,
+            on_bad_lines='warn',  # Parâmetro atualizado
+            header=None,  # Sem cabeçalhos inicialmente
             low_memory=False
         )
+        
+        # Encontrar a linha de cabeçalho
+        linha_cabecalho = encontrar_linha_cabecalho(df)
+        
+        # Define a linha de cabeçalho e reindexa o DataFrame
+        cabecalhos = df.iloc[linha_cabecalho].values
+        df = pd.DataFrame(df.values[linha_cabecalho+1:], columns=cabecalhos)
         
         # Limpar dados
         df = df.dropna(how='all').dropna(axis=1, how='all')
@@ -97,6 +135,8 @@ def processar_arquivo(uploaded_file, encoding='utf-8'):
         # Tentar com encoding alternativo se utf-8 falhar
         if encoding == 'utf-8':
             return processar_arquivo(uploaded_file, 'latin1')
+        elif encoding == 'latin1':
+            return processar_arquivo(uploaded_file, 'cp1252')
         else:
             st.error(f"Erro ao decodificar o arquivo com encoding {encoding}.")
             return None, None
@@ -104,66 +144,139 @@ def processar_arquivo(uploaded_file, encoding='utf-8'):
         st.error(f"Erro ao processar o arquivo: {str(e)}")
         return None, None
 
+# Função para limpar e converter valores numéricos
+def limpar_valor(valor_str):
+    """Limpa e converte valores monetários para float."""
+    if pd.isna(valor_str):
+        return 0.0
+    
+    if isinstance(valor_str, (int, float)):
+        return float(valor_str)
+    
+    # Remove qualquer caractere não numérico exceto . e ,
+    valor_str = re.sub(r'[^\d.,]', '', str(valor_str))
+    
+    if not valor_str:
+        return 0.0
+    
+    # Verifica se temos . e , para determinar o separador decimal
+    if ',' in valor_str and '.' in valor_str:
+        # Se o último separador for uma vírgula, provavelmente é o separador decimal (formato brasileiro)
+        if valor_str.rindex(',') > valor_str.rindex('.'):
+            # Formato brasileiro: 1.234,56
+            valor_str = valor_str.replace('.', '').replace(',', '.')
+        else:
+            # Formato americano: 1,234.56
+            valor_str = valor_str.replace(',', '')
+    elif ',' in valor_str:
+        # Apenas vírgulas presentes, assume que é o separador decimal
+        valor_str = valor_str.replace(',', '.')
+    
+    try:
+        return float(valor_str)
+    except ValueError:
+        return 0.0
+
 # Função para identificar colunas relevantes
 def identificar_colunas(df):
     """Identifica as colunas de código, descrição e valor."""
-    # Padrões para busca
-    padroes_codigo = ['cod', 'código', 'codigo', 'referência', 'referencia', 'ref']
-    padroes_descricao = ['desc', 'descrição', 'descricao', 'serviço', 'servico', 'item']
-    padroes_valor = ['valor total', 'total', 'preço total', 'preco total', 'valor', 'custo']
+    # Padrões para busca (expandidos)
+    padroes_codigo = ['cod', 'código', 'codigo', 'referência', 'referencia', 'ref', 'code', 'item code', 'serviço', 'servico']
+    padroes_descricao = ['desc', 'descrição', 'descricao', 'serviço', 'servico', 'item', 'especificação', 'especificacao']
+    padroes_valor = ['valor total', 'total', 'preço total', 'preco total', 'valor', 'custo', 'custo total', 'preço', 'preco']
     
-    cols = df.columns
+    # Mapeia as colunas para nomes mais fáceis de processar
+    cols_map = {}
+    for col in df.columns:
+        cols_map[str(col).lower().strip()] = col
+    
     coluna_codigo = None
     coluna_descricao = None
     coluna_valor = None
     
-    # Buscar por nomes de colunas
-    for col in cols:
-        col_lower = str(col).lower()
+    # Buscar exatamente pelos nomes comuns em planilhas SINAPI
+    exact_codigo_matches = ['código do serviço', 'código', 'codigo']
+    exact_descricao_matches = ['descrição do serviço', 'descrição', 'descricao']
+    exact_valor_matches = ['custo total', 'valor total', 'total']
+    
+    for col_lower in cols_map:
+        # Verificar correspondências exatas primeiro
+        if not coluna_codigo:
+            if col_lower in exact_codigo_matches:
+                coluna_codigo = cols_map[col_lower]
+                continue
+                
+        if not coluna_descricao:
+            if col_lower in exact_descricao_matches:
+                coluna_descricao = cols_map[col_lower]
+                continue
+                
+        if not coluna_valor:
+            if col_lower in exact_valor_matches:
+                coluna_valor = cols_map[col_lower]
+                continue
         
+        # Verificar padrões parciais
         if not coluna_codigo and any(p in col_lower for p in padroes_codigo):
-            coluna_codigo = col
+            coluna_codigo = cols_map[col_lower]
         
         if not coluna_descricao and any(p in col_lower for p in padroes_descricao):
-            coluna_descricao = col
+            coluna_descricao = cols_map[col_lower]
         
         if not coluna_valor and any(p in col_lower for p in padroes_valor):
-            coluna_valor = col
+            coluna_valor = cols_map[col_lower]
     
     # Se não encontrou pelo nome, verificar conteúdo
     if not coluna_codigo:
-        for col in cols:
+        for col in df.columns:
             valores = df[col].astype(str)
-            if valores.str.match(r'^\d{5,}$').any() or valores.str.match(r'^COMP\s*\d+').any():
+            # Busca por padrões de códigos SINAPI ou códigos compostos
+            if valores.str.match(r'^\d{4,}$').any() or valores.str.match(r'^COMP\s*\d+').any() or valores.str.contains('COMP', case=False).any():
                 coluna_codigo = col
                 break
     
     if not coluna_descricao:
-        for col in cols:
+        for col in df.columns:
             if col == coluna_codigo or col == coluna_valor:
                 continue
             
             valores = df[col].astype(str)
-            if valores.str.len().mean() > 15:  # textos longos são provavelmente descrições
+            # Textos longos são provavelmente descrições
+            if valores.str.len().mean() > 15:
                 coluna_descricao = col
                 break
     
     if not coluna_valor:
         max_valor = 0
-        for col in cols:
+        for col in df.columns:
             if col == coluna_codigo or col == coluna_descricao:
                 continue
             
             try:
-                valores = pd.to_numeric(
-                    df[col].astype(str).str.replace(r'[^\d.,]', '', regex=True).str.replace(',', '.'), 
-                    errors='coerce'
-                )
+                # Limpar e converter valores
+                valores = df[col].apply(limpar_valor)
+                
                 if valores.max() > max_valor and not valores.isna().all():
                     max_valor = valores.max()
                     coluna_valor = col
             except:
                 continue
+    
+    # Exibir informações de depuração sobre as colunas encontradas
+    with st.expander("Informações de depuração - Colunas detectadas"):
+        st.write(f"Coluna de Código: {coluna_codigo}")
+        st.write(f"Coluna de Descrição: {coluna_descricao}")
+        st.write(f"Coluna de Valor: {coluna_valor}")
+        
+        # Mostrar amostra
+        if coluna_codigo and coluna_descricao and coluna_valor:
+            st.write("Amostra de dados:")
+            amostra = pd.DataFrame({
+                'Código': df[coluna_codigo].head(3),
+                'Descrição': df[coluna_descricao].head(3),
+                'Valor': df[coluna_valor].head(3)
+            })
+            st.dataframe(amostra)
     
     return coluna_codigo, coluna_descricao, coluna_valor
 
@@ -174,24 +287,16 @@ def gerar_curva_abc(df, coluna_codigo, coluna_descricao, coluna_valor, limite_a=
         # Criar dicionário para agrupar itens com o mesmo código
         itens_agrupados = {}
         
-        # Verificar se a coluna de valor precisa ser convertida
-        if df[coluna_valor].dtype == object:
-            df[coluna_valor] = df[coluna_valor].astype(str).str.replace(r'[^\d.,]', '', regex=True)
-            df[coluna_valor] = df[coluna_valor].str.replace(',', '.').astype(float)
-        
         # Processar cada linha
         for _, row in df.iterrows():
             codigo = str(row[coluna_codigo]).strip()
             descricao = str(row[coluna_descricao]).strip()
             
-            # Tentar obter o valor
-            try:
-                valor = float(row[coluna_valor])
-            except:
-                valor = 0
+            # Obter o valor usando a função de limpeza
+            valor = limpar_valor(row[coluna_valor])
             
             # Verificar se temos um código válido
-            if codigo and (re.match(r'^\d+$', codigo) or re.match(r'^COMP\s*\d+', codigo) or re.match(r'^COMP\d+', codigo)):
+            if codigo and (re.match(r'^\d+$', codigo) or re.match(r'^COMP\s*\d+', codigo, re.IGNORECASE) or re.match(r'^COMP\d+', codigo, re.IGNORECASE)):
                 if valor > 0:
                     if codigo in itens_agrupados:
                         itens_agrupados[codigo]['valor'] += valor
@@ -204,7 +309,14 @@ def gerar_curva_abc(df, coluna_codigo, coluna_descricao, coluna_valor, limite_a=
         
         # Verificar se encontramos itens
         if not itens_agrupados:
-            return None
+            st.error("Não foi possível encontrar itens válidos. Verifique se as colunas selecionadas estão corretas.")
+            with st.expander("Detalhes do erro"):
+                st.write("Não foram encontrados itens com códigos válidos e valores positivos.")
+                st.write("Verifique se os dados estão no formato esperado:")
+                st.write("- Códigos numéricos ou iniciados com 'COMP'")
+                st.write("- Valores numéricos positivos")
+                st.write("- Colunas corretamente identificadas")
+            return None, 0
         
         # Converter para DataFrame
         df_curva = pd.DataFrame(list(itens_agrupados.values()))
@@ -237,6 +349,9 @@ def gerar_curva_abc(df, coluna_codigo, coluna_descricao, coluna_valor, limite_a=
     
     except Exception as e:
         st.error(f"Erro ao gerar a curva ABC: {str(e)}")
+        import traceback
+        with st.expander("Detalhes do erro"):
+            st.write(traceback.format_exc())
         return None, 0
 
 # Função para criar gráficos interativos com Plotly
@@ -432,7 +547,7 @@ with st.sidebar:
 st.markdown('<div class="highlight">', unsafe_allow_html=True)
 st.markdown("""
 ### Como usar:
-1. Faça upload da planilha sintética do SINAPI (formato CSV)
+1. Faça upload da planilha sintética do SINAPI (formato CSV ou Excel)
 2. Confirme as colunas detectadas automaticamente
 3. Clique em "Gerar Curva ABC"
 4. Visualize os resultados e baixe o arquivo
@@ -440,7 +555,7 @@ st.markdown("""
 st.markdown('</div>', unsafe_allow_html=True)
 
 # Upload do arquivo
-uploaded_file = st.file_uploader("Selecione a planilha sintética do SINAPI", type=["csv"])
+uploaded_file = st.file_uploader("Selecione a planilha sintética do SINAPI", type=["csv", "xlsx", "xls"])
 
 if uploaded_file is not None:
     # Exibir informações do arquivo
@@ -451,7 +566,10 @@ if uploaded_file is not None:
         df, delimitador = processar_arquivo(uploaded_file)
         
         if df is not None:
-            st.success(f"Arquivo carregado com sucesso! Delimitador detectado: '{delimitador}'")
+            if uploaded_file.name.lower().endswith(('.xlsx', '.xls')):
+                st.success(f"Arquivo Excel carregado com sucesso!")
+            else:
+                st.success(f"Arquivo CSV carregado com sucesso! Delimitador detectado: '{delimitador}'")
             
             # Amostra dos dados
             with st.expander("Visualizar amostra dos dados"):
@@ -459,6 +577,10 @@ if uploaded_file is not None:
             
             # Identificar colunas
             col_codigo, col_descricao, col_valor = identificar_colunas(df)
+            
+            # Verificar se as colunas foram encontradas
+            if not col_codigo or not col_descricao or not col_valor:
+                st.warning("Algumas colunas não foram detectadas automaticamente. Por favor, selecione-as manualmente.")
             
             # Interface para seleção das colunas
             st.subheader("Confirme as colunas")
@@ -486,6 +608,26 @@ if uploaded_file is not None:
                     index=list(df.columns).index(col_valor) if col_valor in df.columns else 0
                 )
             
+            # Exibir informações de depuração
+            with st.expander("Informações de depuração - Valores selecionados"):
+                st.write("**Colunas selecionadas:**")
+                st.write(f"Coluna de Código: {col_codigo_selecionada}")
+                st.write(f"Coluna de Descrição: {col_descricao_selecionada}")
+                st.write(f"Coluna de Valor: {col_valor_selecionada}")
+                
+                # Mostrar amostra de valores
+                if df is not None:
+                    st.write("**Amostra de valores das colunas selecionadas:**")
+                    try:
+                        sample_data = pd.DataFrame({
+                            'Código': df[col_codigo_selecionada].head(5),
+                            'Descrição': df[col_descricao_selecionada].head(5),
+                            'Valor': df[col_valor_selecionada].head(5)
+                        })
+                        st.dataframe(sample_data)
+                    except Exception as e:
+                        st.error(f"Erro ao mostrar amostra: {str(e)}")
+            
             # Botão para gerar a curva ABC
             if st.button("Gerar Curva ABC", key="gerar_btn"):
                 with st.spinner('Gerando Curva ABC...'):
@@ -505,7 +647,7 @@ if uploaded_file is not None:
                         st.session_state['curva_gerada'] = True
                         
                         # Redirecionar para atualizar a página e mostrar os resultados
-                        st.experimental_rerun()
+                        st.rerun()  # Atualizado de st.experimental_rerun()
                     else:
                         st.error("Não foi possível gerar a curva ABC. Verifique as colunas selecionadas.")
 
