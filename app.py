@@ -109,7 +109,7 @@ def analyze_excel_sheets(file_content):
         excel_file = pd.ExcelFile(io.BytesIO(file_content))
         sheet_names = excel_file.sheet_names
         target_sheet_name = None
-        target_variations = ['planilhasintetica', 'planilhasintética', 'sintetica', 'sintética', 'resumo', 'planilha_sintética']
+        target_variations = ['planilhasintetica', 'planilhasintética', 'sintetica', 'sintética', 'planilha_sintética']
         for sheet in sheet_names:
             normalized_name = re.sub(r'[\s_]', '', sheet).lower()
             if normalized_name in target_variations:
