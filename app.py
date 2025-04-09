@@ -11,7 +11,6 @@ from plotly.subplots import make_subplots
 import traceback
 import math
 import xlsxwriter
-import locale # Import locale para formatação
 
 # Configuração da página
 st.set_page_config(
@@ -20,16 +19,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Tenta definir locale pt_BR para formatação. Pode falhar dependendo do sistema.
-try:
-    locale.setlocale(locale.LC_ALL, 'pt_BR.UTF-8')
-except locale.Error:
-    try:
-        locale.setlocale(locale.LC_ALL, 'Portuguese_Brazil.1252') # Windows
-    except locale.Error:
-        st.warning("Não foi possível definir o locale pt_BR para formatação numérica automática. Usando formatação manual.")
-        # A formatação manual será usada como fallback
 
 # Estilo CSS personalizado
 st.markdown("""
@@ -52,33 +41,6 @@ st.title("📊 Gerador de Curva ABC")
 st.markdown("### Automatize a geração da Curva ABC a partir de planilhas sintéticas")
 
 # --- Funções Auxiliares ---
-
-# Função de formatação manual pt-BR (Fallback)
-def format_value_br(value, decimals=2, prefix=""):
-    """Formata valor numérico para padrão BR (ponto milhar, vírgula decimal)."""
-    if pd.isna(value) or not isinstance(value, (int, float, np.number)):
-        return str(value) if pd.notna(value) else ''
-    try:
-        # Tenta usar locale primeiro
-        return locale.format_string(f"{prefix}%."+str(decimals)+"f", value, grouping=True)
-    except NameError: # Se locale não foi definido
-         # Formatação manual
-         if isinstance(value, (int, float)):
-              formatted_str = ("{:,." + str(decimals) + "f}").format(value)
-              # Troca separadores
-              formatted_str = formatted_str.replace(",", "X").replace(".", ",").replace("X", ".")
-              return prefix + formatted_str
-         else:
-              return str(value)
-
-def format_percent_br(value, decimals=2):
-    """Formata percentual para padrão BR."""
-    if pd.isna(value) or not isinstance(value, (int, float, np.number)):
-        return str(value) if pd.notna(value) else ''
-    # Formata como número e adiciona %
-    formatted_num = format_value_br(value, decimals)
-    return formatted_num + "%"
-
 
 def detectar_delimitador(sample_content):
     """Detecta o delimitador mais provável em uma amostra de conteúdo CSV."""
@@ -199,7 +161,6 @@ def limpar_valor(valor):
     if pd.isna(valor): return 0.0
     if isinstance(valor, (int, float, np.number)): return float(valor)
     s = str(valor).strip(); s = re.sub(r'[R$€£¥\s]', '', s)
-    # Ajusta para padrão BR antes de converter para float
     if ',' in s and '.' in s: s = s.replace('.', '', s.count('.') - 1).replace(',', '.') if s.rfind(',') > s.rfind('.') else s.replace(',', '')
     elif ',' in s: s = s.replace(',', '.')
     s = re.sub(r'[^\d.]', '', s)
@@ -213,7 +174,6 @@ def limpar_quantidade(qtd):
     s = str(qtd).strip();
     if not s: return 0.0
     s = re.sub(r'[\s]', '', s)
-    # Ajusta para padrão BR antes de converter para float
     if ',' in s and '.' in s: s = s.replace('.', '', s.count('.') - 1).replace(',', '.') if s.rfind(',') > s.rfind('.') else s.replace(',', '')
     elif ',' in s: s = s.replace(',', '.')
     s = re.sub(r'[^\d.]', '', s)
@@ -229,54 +189,107 @@ def truncate(number, decimals=0):
 
 def identificar_colunas(df):
     """Identifica heuristicamente as colunas necessárias."""
-    identified_cols = {}; cols_lower_map = {str(col).lower().strip(): col for col in df.columns}; df_cols_list = list(df.columns)
-    exact_matches = {'codigo': ['código do serviço', 'código', 'codigo', 'cod.', 'item', 'ref'],'descricao': ['descrição do serviço', 'descrição', 'descricao', 'desc', 'especificação', 'serviço'],'valor': ['custo total', 'valor total', 'preço total', 'total', 'valor'],'unidade': ['unidade de medida', 'unid', 'unidade', 'und', 'um'],'quantidade': ['quantidade', 'quantidade total', 'quant', 'qtd', 'qtde'],'custo_unitario': ['custo unitário', 'preço unitário', 'valor unitário', 'custo unitario', 'preco unitario', 'valor unitario', 'unitário']}
+    # --- Início da Função (Indentação Nível 0) ---
+    identified_cols = {}
+    cols_lower_map = {str(col).lower().strip(): col for col in df.columns}
+    df_cols_list = list(df.columns)
+
+    exact_matches = {
+        'codigo': ['código do serviço', 'código', 'codigo', 'cod.', 'item', 'ref'],
+        'descricao': ['descrição do serviço', 'descrição', 'descricao', 'desc', 'especificação', 'serviço'],
+        'valor': ['custo total', 'valor total', 'preço total', 'total', 'valor'],
+        'unidade': ['unidade de medida', 'unid', 'unidade', 'und', 'um'],
+        'quantidade': ['quantidade', 'quantidade total', 'quant', 'qtd', 'qtde'],
+        'custo_unitario': ['custo unitário', 'preço unitário', 'valor unitário', 'custo unitario', 'preco unitario', 'valor unitario', 'unitário']
+    }
+
+    # 1. Identificação por nomes exatos
     for target, patterns in exact_matches.items():
-        if target in identified_cols: continue
+        # --- (Indentação Nível 1) ---
+        if target in identified_cols:
+            continue
         for pattern in patterns:
+            # --- (Indentação Nível 2) ---
             if pattern in cols_lower_map:
                 col_original = cols_lower_map[pattern]
                 if col_original not in identified_cols.values():
                     is_num_ok = True
                     if target in ['valor', 'custo_unitario', 'quantidade']:
-                         is_num_ok = False
-                         try: is_num_ok = pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
-                         except Exception: pass
-                    if is_num_ok: identified_cols[target] = col_original; break
+                        is_num_ok = False
+                        try:
+                            is_num_ok = pd.api.types.is_numeric_dtype(df[col_original]) or \
+                                        df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
+                        except Exception:
+                            pass
+                    if is_num_ok:
+                        identified_cols[target] = col_original
+                        break
+
+    # 2. Heurística para Quantidade após Unidade
     if 'quantidade' not in identified_cols and 'unidade' in identified_cols:
+        # --- (Indentação Nível 1) ---
         col_unidade_nome = identified_cols['unidade']
         try:
+            # --- (Indentação Nível 2) ---
             unidade_idx = df_cols_list.index(col_unidade_nome)
             if unidade_idx + 1 < len(df_cols_list):
                 col_seguinte = df_cols_list[unidade_idx + 1]
                 if col_seguinte not in identified_cols.values():
                     is_num_ok = False
-                    try: is_num_ok = pd.api.types.is_numeric_dtype(df[col_seguinte]) or df[col_seguinte].dropna().astype(str).str.contains(r'[\d,.]').any()
-                    except Exception: pass
-                    if is_num_ok: identified_cols['quantidade'] = col_seguinte
-        except ValueError: pass
+                    try:
+                        is_num_ok = pd.api.types.is_numeric_dtype(df[col_seguinte]) or \
+                                    df[col_seguinte].dropna().astype(str).str.contains(r'[\d,.]').any()
+                    except Exception:
+                        pass
+                    if is_num_ok:
+                        identified_cols['quantidade'] = col_seguinte
+        except ValueError:
+            pass
+
+    # 3. Fallback para Descrição
     available = [c for c in df.columns if c not in identified_cols.values()]
     if 'descricao' not in identified_cols and available:
-         try: identified_cols['descricao'] = max(available, key=lambda c: df[c].astype(str).str.len().mean())
-         except Exception: pass
+        # --- (Indentação Nível 1) ---
+        try:
+            # --- (Indentação Nível 2) ---
+            mean_lengths = {col: df[col].astype(str).str.len().mean() for col in available}
+            if mean_lengths:
+                identified_cols['descricao'] = max(mean_lengths, key=mean_lengths.get)
+        except Exception:
+            pass
+
+    # 4. Fallback para Valor (Re-indentado cuidadosamente com 4 espaços)
     available = [c for c in df.columns if c not in identified_cols.values()]
     if 'valor' not in identified_cols and available:
+        # --- (Indentação Nível 1) ---
         col_sums = {}
         for col in available:
+            # --- Início Bloco Try (Indentação Nível 2) ---
             try:
+                # --- Código dentro do Try (Indentação Nível 3) ---
                 vals = df[col].apply(limpar_valor)
                 s = vals.sum()
                 c = vals.count()
                 l = len(df)
+                # Condição (Indentação Nível 3)
                 if c > l * 0.1:
+                    # Atribuição (Indentação Nível 4)
                     col_sums[col] = s
+            # --- Início Bloco Except (Indentação Nível 2, alinhado com try) ---
             except Exception:
-                continue
+                # --- Código dentro do Except (Indentação Nível 3) ---
+                continue # Pula para próxima coluna
+            # --- Fim Bloco Except ---
+        # --- Código após o loop (Indentação Nível 2) ---
         if col_sums:
             best_val_col = max(col_sums, key=col_sums.get)
             if col_sums[best_val_col] > 0:
                 identified_cols['valor'] = best_val_col
-    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'), identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
+
+    # Return (Indentação Nível 0)
+    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'),
+            identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
+
 
 def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, col_cu=None, lim_a=80, lim_b=95):
     """Gera a curva ABC com cálculo de custo total ajustado para porcentagem (nova lógica)."""
@@ -285,7 +298,7 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
     optional = {'unidade': col_un, 'quantidade': col_qtd, 'custo_unitario': col_cu}
     cols_to_use = list(essential.values()) + [c for c in optional.values() if c and c in df.columns]
     valid_optional = {k: v for k, v in optional.items() if v and v in df.columns}
-    can_calculate_non_percent = 'quantidade' in valid_optional and 'custo_unitario' in valid_optional
+    can_calculate_total = 'quantidade' in valid_optional and 'custo_unitario' in valid_optional
     unit_col_present = 'unidade' in valid_optional
 
     try:
@@ -307,70 +320,31 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
 
         df_agg = df_work.groupby('codigo_str').agg(**agg_config).reset_index().rename(columns={'codigo_str': 'codigo'})
 
-        # *** AJUSTE FINAL: Define o 'valor' final para a curva ABC ***
-        calculated_value_used = False # Flag para saber se o cálculo Qtd*CU foi usado
         def get_final_value(row):
-            nonlocal calculated_value_used
             unit = str(row.get('unidade', '')).strip() if 'unidade' in df_agg.columns else ''
             valor_orig = row.get('valor_original_sum', 0.0)
             qtd = row.get('quantidade', 0)
             cu = row.get('custo_unitario', 0)
-
-            # Garante que qtd e cu sejam numéricos válidos para operações
             qtd_is_valid = isinstance(qtd, (int, float, np.number)) and pd.notna(qtd)
             cu_is_valid = isinstance(cu, (int, float, np.number)) and pd.notna(cu)
             qtd = float(qtd) if qtd_is_valid else 0.0
             cu = float(cu) if cu_is_valid else 0.0
-
             if unit == '%':
-                # Nova lógica para unidade '%'
-                if cu_is_valid and cu >= 500:
-                    # Se CU >= 500, Custo Total é o próprio Custo Unitário
-                    # Não truncamos aqui, assumimos que o CU já está correto
-                    return cu
-                elif cu_is_valid and qtd_is_valid: # Se CU < 500, requer QTD e CU válidos
-                    # Se CU < 500, Custo Total = Qtd * CU (truncado)
-                    calculated_value = qtd * cu
-                    calculated_value_used = True # Marca que cálculo foi feito
-                    return truncate(calculated_value, 2)
-                else:
-                    # Se CU < 500 mas QTD ou CU inválidos, retorna 0 para evitar erro
-                    return 0.0
+                if cu_is_valid and cu >= 500: return cu
+                elif cu_is_valid and qtd_is_valid: return truncate(qtd * cu, 2)
+                else: return 0.0
             else:
-                # Lógica para unidades diferentes de '%'
-                if qtd_is_valid and cu_is_valid:
-                    # Tenta calcular Qtd * CU e truncar
-                    calculated_value = qtd * cu
-                    calculated_value_used = True # Marca que cálculo foi feito
-                    return truncate(calculated_value, 2)
-                else:
-                    # Fallback para valor original se Qtd ou CU inválidos
-                    # st.warning(f"Item {row['codigo']}: Usando valor original (falha Qtd*CU).") # Opcional
-                    return valor_orig
-
-        # Aplica a lógica para criar a coluna 'valor' final
+                if qtd_is_valid and cu_is_valid: return truncate(qtd * cu, 2)
+                else: return valor_orig
         df_agg['valor'] = df_agg.apply(get_final_value, axis=1)
 
-        # Avisa o usuário se o cálculo Qtd*CU foi tentado mas falhou para alguns, ou não foi possível
-        # (Avisos removidos conforme solicitação anterior)
-        # if not unit_col_present and can_calculate_total: st.info(...)
-        # elif not can_calculate_total and not calculated_value_used: st.warning(...)
-        # elif can_calculate_total and not calculated_value_used: st.warning(...)
-
-
-        # Filtra linhas onde o valor final é zero ou negativo
         df_agg = df_agg[df_agg['valor'] > 0]
         if df_agg.empty: st.error("Nenhum item com valor final > 0."); return None, 0, None
+        if 'valor_original_sum' in df_agg.columns: df_agg = df_agg.drop(columns=['valor_original_sum'])
 
-        # Remove coluna temporária do valor original somado, se existir
-        if 'valor_original_sum' in df_agg.columns:
-            df_agg = df_agg.drop(columns=['valor_original_sum'])
-
-        # Recalcula v_total com base no 'valor' final
         v_total = df_agg['valor'].sum()
         if v_total <= 0: st.error("Valor total final é zero ou negativo."); return None, 0, None
 
-        # Continua com cálculos da curva ABC
         df_curve = df_agg.sort_values('valor', ascending=False).reset_index(drop=True)
         df_curve['percentual'] = (df_curve['valor'] / v_total * 100)
         df_curve['percentual_acumulado'] = df_curve['percentual'].cumsum()
@@ -378,7 +352,6 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
         df_curve['classificacao'] = df_curve['percentual_acumulado'].apply(lambda p: 'A' if p <= lim_a + 1e-9 else ('B' if p <= lim_b + 1e-9 else 'C'))
         df_curve['posicao'] = range(1, len(df_curve) + 1)
 
-        # Ordem das colunas internas (sem 'posicao')
         final_cols_internal = ['codigo', 'descricao']
         if 'unidade' in df_curve.columns: final_cols_internal.append('unidade')
         if 'quantidade' in df_curve.columns: final_cols_internal.append('quantidade')
@@ -391,8 +364,7 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
     except KeyError as e: st.error(f"Erro: Coluna essencial não encontrada: {e}."); return None, 0, None
     except Exception as e: st.error(f"Erro inesperado gerar curva: {str(e)}"); return None, 0, None
 
-
-# --- Funções de Visualização e Download ---
+# --- Funções de Visualização e Download --- (Mantidas como v1.14)
 def criar_graficos_plotly(df_curva_with_pos, valor_total, limite_a, limite_b):
     """Cria gráficos interativos usando Plotly."""
     if df_curva_with_pos is None or df_curva_with_pos.empty: return None
@@ -429,51 +401,21 @@ def get_download_link(df_orig, filename, text, file_format='csv'):
         df_download = df_download[[col for col in download_col_order if col in df_download.columns]]
 
         if file_format == 'csv':
-            # Formata números para CSV no padrão BR
-            num_cols_br = ['QUANTIDADE TOTAL', 'CUSTO UNITÁRIO', 'CUSTO TOTAL', 'CUSTO TOTAL ACUMULADO', '% DO ITEM', '% ACUMULADO']
-            for col in num_cols_br:
-                if col in df_download.columns:
-                    # Aplica formatação com vírgula decimal para CSV
-                    df_download[col] = df_orig[rename_map_download.keys()[list(rename_map_download.values()).index(col)]].apply(
-                         lambda x: format_value_br(x, 2).replace('.', '') if isinstance(x, (int, float, np.number)) else x # Remove separador de milhar para CSV
-                    ) # Usa format_value_br e remove ponto milhar
-
-            data = df_download.to_csv(index=False, sep=';', decimal=',', encoding='utf-8-sig') # Decimal já é vírgula
+            data = df_download.to_csv(index=False, sep=';', decimal=',', encoding='utf-8-sig')
             mime = 'text/csv'
-
         elif file_format == 'excel':
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                # Escreve dados *numéricos* originais para Excel formatar corretamente
-                df_orig_renamed = df_orig.copy()
-                df_orig_renamed.rename(columns=rename_map_download, inplace=True)
-                df_orig_renamed = df_orig_renamed[[col for col in download_col_order if col in df_orig_renamed.columns]]
-                df_orig_renamed.to_excel(writer, sheet_name='Curva ABC', index=False)
-
+                df_download.to_excel(writer, sheet_name='Curva ABC', index=False)
                 workbook = writer.book
                 worksheet = writer.sheets['Curva ABC']
-                # Formatos padrão Excel (ele adapta ao locale do usuário)
                 header_fmt = workbook.add_format({'bold': True, 'bg_color': '#1e3c72', 'color': 'white', 'align': 'center', 'valign': 'vcenter', 'border': 1})
-                currency_fmt = workbook.add_format({'num_format': 'R$ #,##0.00', 'border': 1})
-                percent_fmt = workbook.add_format({'num_format': '0.00%', 'border': 1})
-                number_fmt = workbook.add_format({'num_format': '#,##0.00', 'border': 1})
-                center_fmt = workbook.add_format({'align': 'center', 'border': 1})
-
                 # Aplica formato cabeçalho e largura básica
-                for col_num, value in enumerate(df_orig_renamed.columns.values):
+                for col_num, value in enumerate(df_download.columns.values):
                     worksheet.write(0, col_num, value, header_fmt)
-                    # Aplica formato de célula se aplicável
-                    col_name = value # Nome já renomeado
-                    fmt = None
-                    if col_name in ['CUSTO UNITÁRIO', 'CUSTO TOTAL', 'CUSTO TOTAL ACUMULADO']: fmt = currency_fmt
-                    elif col_name in ['% DO ITEM', '% ACUMULADO']: fmt = percent_fmt
-                    elif col_name in ['QUANTIDADE TOTAL']: fmt = number_fmt
-                    elif col_name in ['FAIXA']: fmt = center_fmt
-
-                    try: width = min(max(df_orig_renamed[col_name].astype(str).map(len).max(), len(col_name)) + 2, 60)
-                    except: width = len(col_name) + 5
-                    worksheet.set_column(col_num, col_num, width, fmt) # Aplica formato de célula
-
+                    try: width = min(max(df_download[value].astype(str).map(len).max(), len(value)) + 2, 60)
+                    except: width = len(value) + 5
+                    worksheet.set_column(col_num, col_num, width) # Simplificado: Sem formato de célula
             output.seek(0)
             data = output.read()
             mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -483,10 +425,10 @@ def get_download_link(df_orig, filename, text, file_format='csv'):
 
         st.download_button(label=text, data=data, file_name=filename, mime=mime, key=f"dl_{file_format}")
     except Exception as e:
-        print(f"DEBUG: Erro download ({file_format}): {e}")
+        print(f"DEBUG: Erro download ({file_format}): {e}") # Opcional: log no console
 
 
-# --- Interface Streamlit ---
+# --- Interface Streamlit --- (Mantida como v1.14)
 
 # Sidebar
 with st.sidebar:
@@ -496,10 +438,10 @@ with st.sidebar:
     lim_a = st.slider("Limite A (%)", 50, 95, st.session_state.limite_a, 1, key='lim_a_sld')
     lim_b_min = lim_a + 1; lim_b = st.slider("Limite B (%)", lim_b_min, 99, max(st.session_state.limite_b, lim_b_min), 1, key='lim_b_sld')
     st.session_state.limite_a, st.session_state.limite_b = lim_a, lim_b
-    st.markdown("---"); st.subheader("ℹ️ Sobre"); st.info("Gera Curvas ABC. v1.16"); st.markdown("---"); st.caption(f"© {datetime.now().year}")
+    st.markdown("---"); st.subheader("ℹ️ Sobre"); st.info("Gera Curvas ABC. v1.15"); st.markdown("---"); st.caption(f"© {datetime.now().year}")
 
 # Conteúdo Principal
-st.markdown('<div class="highlight">', unsafe_allow_html=True); st.markdown("#### Como usar:\n1. **Faça o upload da planilha de orçamentação**.\n2. **Confirme/Selecione Aba e Colunas**.\n3. Ajuste **Limites** se necessário.\n4. Clique **Gerar**.\n5. **Analise/Baixe/Copie**."); st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('<div class="highlight">', unsafe_allow_html=True); st.markdown("#### Como usar:\n1. **Faça o upload da planilha de orçamentação completa**.\n2. **Confirme/Selecione Aba e Colunas**.\n3. Ajuste **Limites**, se necessário.\n4. Clique **Gerar**.\n5. **Analise/Baixe/Copie**."); st.markdown('</div>', unsafe_allow_html=True)
 
 # Upload
 uploaded_file = st.file_uploader("📂 Selecione a planilha", type=["csv", "xlsx", "xls"], key="file_uploader")
@@ -521,18 +463,18 @@ if uploaded_file:
     if st.session_state.last_uploaded_filename != uploaded_file.name:
         for k in default_state: st.session_state[k] = default_state[k] # Reset completo
         st.session_state.last_uploaded_filename = uploaded_file.name
-        st.session_state.excel_file_bytes = uploaded_file.getvalue()
-        st.session_state.file_analyzed = False
-        st.session_state.sheet_selected = False
-        st.session_state.df_processed = None
-        st.session_state.curva_gerada = False
+        st.session_state.excel_file_bytes = uploaded_file.getvalue() # Armazena conteúdo
+        st.session_state.file_analyzed = False # Marca para analisar
+        st.session_state.sheet_selected = False # Ainda não selecionou aba
+        st.session_state.df_processed = None # Limpa df processado
+        st.session_state.curva_gerada = False # Limpa resultados anteriores
 
     if not st.session_state.file_analyzed:
         file_name_lower = uploaded_file.name.lower()
         is_excel = file_name_lower.endswith(('.xlsx', '.xls'))
         st.session_state.is_excel = is_excel
         if is_excel:
-            with st.spinner("Analisando abas..."):
+            with st.spinner("Analisando abas do Excel..."):
                 sheet_names, target_sheet = analyze_excel_sheets(st.session_state.excel_file_bytes)
                 if sheet_names:
                     st.session_state.sheet_names = sheet_names
@@ -540,7 +482,7 @@ if uploaded_file:
                     if target_sheet is not None:
                         st.session_state.sheet_selected = True
                         st.session_state.user_selected_sheet = target_sheet
-                else: st.session_state.last_uploaded_filename = None
+                else: st.session_state.last_uploaded_filename = None # Erro na análise
         else: st.session_state.sheet_selected = True
         st.session_state.file_analyzed = True
 
@@ -603,7 +545,7 @@ if st.session_state.curva_gerada and st.session_state.curva_abc is not None:
     st.subheader("📊 Resumo"); stats_cols = st.columns(4)
     classes_count = resultado_final['classificacao'].value_counts().to_dict(); val_classe = resultado_final.groupby('classificacao')['valor'].sum().to_dict()
     with stats_cols[0]: st.metric("Itens", f"{len(resultado_final):,}")
-    with stats_cols[1]: st.metric("Valor Total", f"R$ {valor_total_final:,.2f}") # Usa formatação padrão locale
+    with stats_cols[1]: st.metric("Valor Total", f"R$ {valor_total_final:,.2f}")
     count_a = classes_count.get('A', 0); perc_ca = (count_a/len(resultado_final)*100) if len(resultado_final) else 0
     with stats_cols[2]: st.metric("Itens A", f"{count_a} ({perc_ca:.1f}%)")
     val_a = val_classe.get('A', 0); perc_va = (val_a/valor_total_final*100) if valor_total_final else 0
@@ -616,37 +558,26 @@ if st.session_state.curva_gerada and st.session_state.curva_abc is not None:
     with f_c2: busca = st.text_input("Buscar Código/Descrição", key='f_busca')
     df_filt_orig = resultado_final[resultado_final['classificacao'].isin(classe_f)]
     if busca: df_filt_orig = df_filt_orig[df_filt_orig['codigo'].astype(str).str.contains(busca, na=False, case=False) | df_filt_orig['descricao'].astype(str).str.contains(busca, na=False, case=False)]
-
-    # Preparar para exibição (renomear, formatar, ordenar)
     df_exib = df_filt_orig.copy()
     rename_map_disp = {'codigo': 'CÓDIGO DO SERVIÇO', 'descricao': 'DESCRIÇÃO DO SERVIÇO', 'unidade': 'UNIDADE', 'quantidade': 'QTD TOTAL', 'custo_unitario': 'CUSTO UNIT.', 'valor': 'CUSTO TOTAL', 'custo_total_acumulado': 'CUSTO ACUM.', 'percentual': '% ITEM', 'percentual_acumulado': '% ACUM.', 'classificacao': 'FAIXA'}
     df_exib.rename(columns=rename_map_disp, inplace=True)
     display_col_order = ['CÓDIGO DO SERVIÇO', 'DESCRIÇÃO DO SERVIÇO', 'UNIDADE', 'QTD TOTAL', 'CUSTO UNIT.', 'CUSTO TOTAL', 'CUSTO ACUM.', '% ITEM', '% ACUM.', 'FAIXA']
     df_exib = df_exib[[col for col in display_col_order if col in df_exib.columns]]
-
-    # *** AJUSTE FORMATAÇÃO TABELA ***
-    # Aplica formatação BR a todas as colunas numéricas relevantes para exibição
-    cols_to_format_br = ['QTD TOTAL', 'CUSTO UNIT.', 'CUSTO TOTAL', 'CUSTO ACUM.']
-    cols_to_format_perc = ['% ITEM', '% ACUM.']
-
-    for col_display in cols_to_format_br:
-         if col_display in df_exib.columns:
-              original_col_name = next((k for k, v in rename_map_disp.items() if v == col_display), None)
-              if original_col_name and original_col_name in df_filt_orig.columns:
-                   df_exib[col_display] = df_filt_orig[original_col_name].apply(lambda x: format_value_br(x, 2, prefix="R$ " if "CUSTO" in col_display else ""))
-
-    for col_display in cols_to_format_perc:
-         if col_display in df_exib.columns:
-              original_col_name = next((k for k, v in rename_map_disp.items() if v == col_display), None)
-              if original_col_name and original_col_name in df_filt_orig.columns:
-                   df_exib[col_display] = df_filt_orig[original_col_name].apply(lambda x: format_percent_br(x, 2))
-
+    format_disp = {'CUSTO UNIT.': 'R$ {:,.2f}', 'CUSTO TOTAL': 'R$ {:,.2f}', 'CUSTO ACUM.': 'R$ {:,.2f}', '% ITEM': '{:.2f}%', '% ACUM.': '{:.2f}%', 'QTD TOTAL': '{:,.2f}'}
+    reverse_rename_map = {v: k for k, v in rename_map_disp.items()}
+    for col_display, fmt in format_disp.items():
+        if col_display in df_exib.columns:
+            original_col_name = reverse_rename_map.get(col_display)
+            if original_col_name and original_col_name in df_filt_orig.columns:
+                 try: df_exib[col_display] = df_filt_orig[original_col_name].apply(lambda x: fmt.format(x) if pd.notna(x) and isinstance(x, (int, float, np.number)) else (x if pd.notna(x) else ''))
+                 except (TypeError, ValueError, KeyError):
+                      try: df_exib[col_display] = df_exib[col_display].apply(lambda x: fmt.format(float(x)) if pd.notna(x) else '')
+                      except: pass
     st.dataframe(df_exib, height=400, use_container_width=True)
-
     st.subheader("📥 Downloads"); dl_c1, dl_c2 = st.columns(2)
     ts = datetime.now().strftime("%Y%m%d_%H%M")
-    with dl_c1: get_download_link(resultado_final, f"curva_abc_{ts}.csv", "Baixar CSV", 'csv') # Passa resultado_final (dados numéricos)
-    with dl_c2: get_download_link(resultado_final, f"curva_abc_{ts}.xlsx", "Baixar Excel", 'excel') # Passa resultado_final (dados numéricos)
+    with dl_c1: get_download_link(resultado_final, f"curva_abc_{ts}.csv", "Baixar CSV", 'csv')
+    with dl_c2: get_download_link(resultado_final, f"curva_abc_{ts}.xlsx", "Baixar Excel", 'excel')
 
 # Rodapé
 st.markdown('<div class="footer">', unsafe_allow_html=True); st.markdown(f"© {datetime.now().year} - Gerador Curva ABC"); st.markdown('</div>', unsafe_allow_html=True)
