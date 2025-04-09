@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-# import matplotlib.pyplot as plt # Matplotlib não está sendo usado nos gráficos
-# import seaborn as sns # Seaborn não está sendo usado
 import io
 import base64
 import re
@@ -10,72 +8,37 @@ from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import traceback # Para exibir detalhes do erro
-import math # Importa math para truncamento
-import xlsxwriter # Importado explicitamente para referência
+import traceback
+import math
+import xlsxwriter
 
 # Configuração da página
 st.set_page_config(
-    page_title="Gerador de Curva ABC - SINAPI",
+    page_title="Gerador de Curva ABC",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilo CSS personalizado (mantido como estava)
+# Estilo CSS personalizado
 st.markdown("""
 <style>
-    .reportview-container {
-        background-color: #f0f2f6;
-    }
-    .sidebar .sidebar-content {
-        background-color: #f0f2f6;
-    }
-    h1, h2, h3 {
-        color: #1e3c72;
-    }
-    .stButton>button {
-        background-color: #1e3c72;
-        color: white;
-        border-radius: 5px; /* Adicionado arredondamento */
-        border: none; /* Removido borda padrão */
-        padding: 10px 15px; /* Ajustado padding */
-    }
-    .stButton>button:hover {
-        background-color: #2a5298; /* Cor um pouco mais clara no hover */
-    }
-    .highlight {
-        background-color: #ffffff; /* Fundo branco para destaque */
-        padding: 20px;
-        border-radius: 10px;
-        border-left: 5px solid #1e3c72;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.1); /* Sombra suave */
-        margin-bottom: 20px; /* Espaçamento inferior */
-    }
-    .footer {
-        margin-top: 40px; /* Mais espaço antes do rodapé */
-        padding-top: 10px;
-        border-top: 1px solid #ddd;
-        text-align: center;
-        font-size: 0.8em;
-        color: #666;
-    }
-    /* Melhorar aparência dos expanders */
-    .streamlit-expanderHeader {
-        background-color: #e8eaf6;
-        color: #1e3c72;
-        border-radius: 5px;
-    }
-    /* Ajustar tamanho da fonte na tabela de resultados */
-    .stDataFrame div[data-testid="stTable"] {
-        font-size: 0.9rem;
-    }
+    /* Estilos mantidos da versão anterior */
+    .reportview-container { background-color: #f0f2f6; }
+    .sidebar .sidebar-content { background-color: #f0f2f6; }
+    h1, h2, h3 { color: #1e3c72; }
+    .stButton>button { background-color: #1e3c72; color: white; border-radius: 5px; border: none; padding: 10px 15px; }
+    .stButton>button:hover { background-color: #2a5298; }
+    .highlight { background-color: #ffffff; padding: 20px; border-radius: 10px; border-left: 5px solid #1e3c72; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
+    .footer { margin-top: 40px; padding-top: 10px; border-top: 1px solid #ddd; text-align: center; font-size: 0.8em; color: #666; }
+    .streamlit-expanderHeader { background-color: #e8eaf6; color: #1e3c72; border-radius: 5px; }
+    .stDataFrame div[data-testid="stTable"] { font-size: 0.9rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # Título principal
-st.title("📊 Gerador de Curva ABC - SINAPI")
-st.markdown("### Automatize a geração da Curva ABC a partir de planilhas sintéticas do SINAPI")
+st.title("📊 Gerador de Curva ABC")
+st.markdown("### Automatize a geração da Curva ABC a partir de planilhas sintéticas")
 
 # --- Funções Auxiliares ---
 
@@ -94,133 +57,115 @@ def encontrar_linha_cabecalho(df_preview):
         'CÓDIGO', 'ITEM', 'DESCRIÇÃO', 'CUSTO', 'VALOR', 'TOTAL', 'PREÇO', 'SERVIÇO',
         'UNID', 'UNIDADE', 'UM', 'QUANT', 'QTD', 'QUANTIDADE', 'UNITÁRIO', 'UNITARIO'
     ]
-    max_matches = 0
-    header_row_index = 0
+    max_matches = 0; header_row_index = 0
     for i in range(min(20, len(df_preview))):
         try:
             row_values = df_preview.iloc[i].dropna().astype(str).str.upper().tolist()
             current_matches = sum(any(keyword in cell for keyword in cabecalhos_possiveis) for cell in row_values)
             if 'DESCRIÇÃO' in row_values or 'CODIGO' in row_values or 'CÓDIGO' in row_values: current_matches += 2
-            if current_matches > max_matches:
-                max_matches = current_matches
-                header_row_index = i
+            if current_matches > max_matches: max_matches = current_matches; header_row_index = i
         except Exception: continue
     if max_matches < 2 and df_preview.iloc[0].isnull().all():
          if len(df_preview) > 1 and not df_preview.iloc[1].isnull().all(): return 1
-         else: return 0
     elif max_matches == 0: return 0
     return header_row_index
 
 def sanitizar_dataframe(df):
-    """Sanitiza o DataFrame para garantir compatibilidade com Streamlit/PyArrow."""
+    """Sanitiza o DataFrame para garantir compatibilidade."""
     if df is None: return None
-    df_clean = df.copy()
-    new_columns = []
-    seen_columns = {}
+    df_clean = df.copy(); new_columns = []; seen_columns = {}
     for i, col in enumerate(df_clean.columns):
         col_str = str(col).strip() if pd.notna(col) else f"coluna_{i}"
         if not col_str: col_str = f"coluna_{i}"
         col_base = col_str.rsplit('_', 1)[0] if '_' in col_str and col_str.rsplit('_', 1)[-1].isdigit() else col_str
         count = seen_columns.get(col_base, 0)
-        while col_str in seen_columns:
-             count += 1
-             col_str = f"{col_base}_{count}"
-        seen_columns[col_str] = 0 # Marca como visto
-        new_columns.append(col_str)
+        while col_str in seen_columns: count += 1; col_str = f"{col_base}_{count}"
+        seen_columns[col_str] = 0; new_columns.append(col_str)
     df_clean.columns = new_columns
-
     for col in df_clean.columns:
         try:
-            col_dtype = df_clean[col].dtype
-            if pd.api.types.is_numeric_dtype(col_dtype): continue
+            if pd.api.types.is_numeric_dtype(df_clean[col].dtype): continue
             converted_col = pd.to_numeric(df_clean[col], errors='coerce')
-            if not converted_col.isnull().all() and converted_col.notnull().sum() / len(df_clean[col]) > 0.5:
-                 df_clean[col] = converted_col
-                 continue
+            if not converted_col.isnull().all() and converted_col.notnull().sum() / len(df_clean[col]) > 0.5: df_clean[col] = converted_col; continue
             if df_clean[col].dtype == 'object':
                  try:
                       converted_dt = pd.to_datetime(df_clean[col], errors='coerce')
-                      if not converted_dt.isnull().all() and converted_dt.notnull().sum() / len(df_clean[col]) > 0.5:
-                           df_clean[col] = converted_dt
-                           continue
+                      if not converted_dt.isnull().all() and converted_dt.notnull().sum() / len(df_clean[col]) > 0.5: df_clean[col] = converted_dt; continue
                  except Exception: pass
-            if df_clean[col].dtype == 'object' or df_clean[col].apply(type).nunique() > 1:
-                 df_clean[col] = df_clean[col].astype(str).replace('nan', '', regex=False).replace('NaT', '', regex=False)
+            if df_clean[col].dtype == 'object' or df_clean[col].apply(type).nunique() > 1: df_clean[col] = df_clean[col].astype(str).replace('nan', '', regex=False).replace('NaT', '', regex=False)
             if isinstance(df_clean[col].dtype, pd.StringDtype) or df_clean[col].dtype == 'object':
-                 if df_clean[col].apply(lambda x: isinstance(x, str)).any():
-                      df_clean[col] = df_clean[col].astype(str).str.replace('\x00', '', regex=False)
+                 if df_clean[col].apply(lambda x: isinstance(x, str)).any(): df_clean[col] = df_clean[col].astype(str).str.replace('\x00', '', regex=False)
         except Exception:
             try: df_clean[col] = df_clean[col].astype(str)
-            except Exception: st.error(f"Falha crítica ao converter coluna '{col}' para string.")
-
+            except Exception: st.error(f"Falha crítica converter coluna '{col}'.")
     df_clean = df_clean.dropna(how='all').dropna(axis=1, how='all')
     return df_clean
 
-# --- Função Principal de Processamento ---
+# --- Funções de Processamento Refatoradas ---
 
-def processar_arquivo(uploaded_file):
-    """Carrega e processa o arquivo CSV ou Excel, buscando a aba 'Sintética'."""
-    df = None; delimitador = None; linha_cabecalho = 0
-    encodings_to_try = ['utf-8', 'latin1', 'cp1252']
-
+def analyze_excel_sheets(file_content):
+    """Analisa um arquivo Excel, retorna nomes das abas e tenta encontrar a 'Sintética'."""
     try:
-        file_name = uploaded_file.name.lower()
-        file_content = uploaded_file.getvalue()
+        excel_file = pd.ExcelFile(io.BytesIO(file_content))
+        sheet_names = excel_file.sheet_names
+        target_sheet_name = None
+        target_variations = ['planilhasintetica', 'planilhasintética', 'sintetica', 'sintética', 'resumo', 'planilha_sintética']
+        for sheet in sheet_names:
+            normalized_name = re.sub(r'[\s_]', '', sheet).lower()
+            if normalized_name in target_variations:
+                target_sheet_name = sheet
+                break
+        return sheet_names, target_sheet_name
+    except Exception as e:
+        st.error(f"Erro ao analisar abas do Excel: {e}")
+        return None, None
 
-        # --- Processamento Excel ---
-        if file_name.endswith(('.xlsx', '.xls')):
+def load_and_process_sheet(file_content, sheet_to_read, is_excel, file_name=None):
+    """Carrega dados da aba/arquivo especificado, encontra cabeçalho e sanitiza."""
+    df = None
+    linha_cabecalho = 0
+    try:
+        if is_excel:
+            engine_to_use = 'openpyxl' if file_name and file_name.endswith('.xlsx') else 'xlrd'
+            if engine_to_use == 'xlrd':
+                 try: import xlrd
+                 except ImportError: st.warning("Engine 'xlrd' necessário para .xls.")
+            # 1. Ler preview para cabeçalho
             try:
-                excel_file = pd.ExcelFile(io.BytesIO(file_content))
-                sheet_names = excel_file.sheet_names
-                target_sheet_name = None
-                target_variations = ['planilhasintetica', 'planilhasintética', 'sintetica', 'sintética', 'planilha_sintética', 'planilha_sintetica', 'PLANILHA_SINTÉTICA FORM OK']
-                for sheet in sheet_names:
-                    normalized_name = re.sub(r'[\s_]', '', sheet).lower()
-                    if normalized_name in target_variations:
-                        target_sheet_name = sheet
-                        st.info(f"Encontrada aba correspondente: '{target_sheet_name}'")
-                        break
-                sheet_to_read = target_sheet_name if target_sheet_name is not None else sheet_names[0]
-                if target_sheet_name is None:
-                    st.warning(f"Nenhuma aba como 'Planilha Sintética' encontrada. Lendo a primeira aba: '{sheet_names[0]}'.")
-
-                engine_to_use = 'openpyxl' if file_name.endswith('.xlsx') else 'xlrd'
-                if engine_to_use == 'xlrd':
-                     try: import xlrd
-                     except ImportError: st.warning("Engine 'xlrd' necessário para .xls. Instale: pip install xlrd")
-
-                try:
-                    df_preview = pd.read_excel(excel_file, sheet_name=sheet_to_read, nrows=25, header=None)
-                    linha_cabecalho = encontrar_linha_cabecalho(df_preview)
-                except Exception as e_preview:
-                    st.warning(f"Erro preview aba '{sheet_to_read}': {e_preview}. Assumindo linha 0.")
-                    linha_cabecalho = 0
-                df = pd.read_excel(excel_file, sheet_name=sheet_to_read, header=linha_cabecalho)
-            except Exception as e_excel: st.error(f"Erro processar Excel: {e_excel}"); return None, None
-        # --- Processamento CSV ---
-        elif file_name.endswith('.csv'):
+                df_preview = pd.read_excel(io.BytesIO(file_content), sheet_name=sheet_to_read, nrows=25, header=None, engine=engine_to_use)
+                linha_cabecalho = encontrar_linha_cabecalho(df_preview)
+            except Exception as e_preview:
+                st.warning(f"Erro preview aba '{sheet_to_read}': {e_preview}. Assumindo linha 0.")
+                linha_cabecalho = 0
+            # 2. Ler dados completos
+            df = pd.read_excel(io.BytesIO(file_content), sheet_name=sheet_to_read, header=linha_cabecalho, engine=engine_to_use)
+        else: # É CSV
             decoded_content = None; detected_encoding = None
+            encodings_to_try = ['utf-8', 'latin1', 'cp1252']
             for enc in encodings_to_try:
                 try: decoded_content = file_content.decode(enc); detected_encoding = enc; break
                 except UnicodeDecodeError: continue
-            if decoded_content is None: st.error("Erro decodificação CSV."); return None, None
-            if not decoded_content.strip(): st.error("Arquivo CSV vazio."); return None, None
+            if decoded_content is None: st.error("Erro decodificação CSV."); return None
+            if not decoded_content.strip(): st.error("Arquivo CSV vazio."); return None
             delimitador = detectar_delimitador(decoded_content[:5000])
             try: df_preview = pd.read_csv(io.StringIO(decoded_content), delimiter=delimitador, nrows=25, header=None, skipinitialspace=True, low_memory=False); linha_cabecalho = encontrar_linha_cabecalho(df_preview)
             except Exception: linha_cabecalho = 0
             df = pd.read_csv(io.StringIO(decoded_content), delimiter=delimitador, header=linha_cabecalho, encoding=detected_encoding, on_bad_lines='warn', skipinitialspace=True, low_memory=False)
-        else: st.error("Formato não suportado."); return None, None
-        # --- Pós-processamento ---
+
+        # Pós-processamento
         if df is not None:
             df = df.dropna(how='all').dropna(axis=1, how='all')
-            if df.empty: st.error("Arquivo/Aba vazio(a) após limpeza."); return None, delimitador
+            if df.empty: st.error("Arquivo/Aba vazio(a) após limpeza."); return None
             df = sanitizar_dataframe(df)
-            if df is None or df.empty: st.error("Falha sanitização."); return None, delimitador
-            return df, delimitador
-        else: return None, delimitador
-    except Exception as e: st.error(f"Erro fatal processar: {e}"); return None, None
+            if df is None or df.empty: st.error("Falha sanitização."); return None
+            return df
+        else: return None
+    except Exception as e: st.error(f"Erro ao carregar dados: {e}"); return None
+
 
 # --- Funções da Curva ABC (limpeza, identificação, geração) ---
+# (Funções limpar_valor, limpar_quantidade, truncate, identificar_colunas, gerar_curva_abc,
+# criar_graficos_plotly, get_download_link mantidas como na versão anterior - v1.13)
 
 def limpar_valor(valor):
     """Limpa e converte valores monetários para float."""
@@ -246,7 +191,6 @@ def limpar_quantidade(qtd):
     try: return float(s) if s else 0.0
     except ValueError: return 0.0
 
-# Função para truncar um número em n casas decimais
 def truncate(number, decimals=0):
     """Trunca um número para um número específico de casas decimais."""
     if not isinstance(number, (int, float, np.number)): return number
@@ -256,20 +200,8 @@ def truncate(number, decimals=0):
 
 def identificar_colunas(df):
     """Identifica heuristicamente as colunas necessárias."""
-    identified_cols = {}
-    cols_lower_map = {str(col).lower().strip(): col for col in df.columns}
-    df_cols_list = list(df.columns)
-
-    exact_matches = {
-        'codigo': ['código do serviço', 'código', 'codigo', 'cod.', 'item', 'ref'],
-        'descricao': ['descrição do serviço', 'descrição', 'descricao', 'desc', 'especificação', 'serviço'],
-        'valor': ['custo total', 'valor total', 'preço total', 'total', 'valor'],
-        'unidade': ['unidade de medida', 'unid', 'unidade', 'und', 'um'],
-        'quantidade': ['quantidade', 'quantidade total', 'quant', 'qtd', 'qtde'],
-        'custo_unitario': ['custo unitário', 'preço unitário', 'valor unitário', 'custo unitario', 'preco unitario', 'valor unitario', 'unitário']
-    }
-
-    # Identificação por nomes exatos
+    identified_cols = {}; cols_lower_map = {str(col).lower().strip(): col for col in df.columns}; df_cols_list = list(df.columns)
+    exact_matches = {'codigo': ['código do serviço', 'código', 'codigo', 'cod.', 'item', 'ref'],'descricao': ['descrição do serviço', 'descrição', 'descricao', 'desc', 'especificação', 'serviço'],'valor': ['custo total', 'valor total', 'preço total', 'total', 'valor'],'unidade': ['unidade de medida', 'unid', 'unidade', 'und', 'um'],'quantidade': ['quantidade', 'quantidade total', 'quant', 'qtd', 'qtde'],'custo_unitario': ['custo unitário', 'preço unitário', 'valor unitário', 'custo unitario', 'preco unitario', 'valor unitario', 'unitário']}
     for target, patterns in exact_matches.items():
         if target in identified_cols: continue
         for pattern in patterns:
@@ -282,8 +214,6 @@ def identificar_colunas(df):
                          try: is_num_ok = pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
                          except Exception: pass
                     if is_num_ok: identified_cols[target] = col_original; break
-
-    # Heurística para Quantidade após Unidade
     if 'quantidade' not in identified_cols and 'unidade' in identified_cols:
         col_unidade_nome = identified_cols['unidade']
         try:
@@ -296,48 +226,21 @@ def identificar_colunas(df):
                     except Exception: pass
                     if is_num_ok: identified_cols['quantidade'] = col_seguinte
         except ValueError: pass
-
-    # Fallback para Descrição
     available = [c for c in df.columns if c not in identified_cols.values()]
     if 'descricao' not in identified_cols and available:
-        try:
-            mean_lengths = {col: df[col].astype(str).str.len().mean() for col in available}
-            if mean_lengths: identified_cols['descricao'] = max(mean_lengths, key=mean_lengths.get)
-        except Exception: pass
-
-    # *** LÓGICA DE FALLBACK PARA VALOR REESTRUTURADA E COM INDENTAÇÃO CORRIGIDA ***
-    available = [c for c in df.columns if c not in identified_cols.values()] # Atualiza disponíveis
+         try: identified_cols['descricao'] = max(available, key=lambda c: df[c].astype(str).str.len().mean())
+         except Exception: pass
+    available = [c for c in df.columns if c not in identified_cols.values()]
     if 'valor' not in identified_cols and available:
-        col_sums = {} # Dicionário para guardar somas das colunas válidas
-        # Calcula as somas primeiro
+        col_sums = {}
         for col in available:
-            # Garante indentação com 4 espaços
-            try:
-                # Garante indentação com 4 espaços
-                vals = df[col].apply(limpar_valor)
-                s = vals.sum()
-                c = vals.count()
-                l = len(df)
-                # Considera a coluna válida se tiver mais de 10% de valores numéricos
-                if c > l * 0.1:
-                    col_sums[col] = s # Armazena a soma
-            except Exception:
-                # Ignora colunas que causam erro durante limpeza/soma
-                continue # Pula para a próxima coluna no loop
-
-        # Encontra a coluna com a maior soma entre as válidas
-        if col_sums: # Verifica se alguma coluna foi processada com sucesso
-            # Encontra a chave (nome da coluna) com o maior valor no dicionário col_sums
+            try: vals = df[col].apply(limpar_valor); s = vals.sum(); c = vals.count(); l = len(df)
+                 if c > l * 0.1: col_sums[col] = s
+            except Exception: continue
+        if col_sums:
             best_val_col = max(col_sums, key=col_sums.get)
-            # Garante que a soma máxima seja positiva antes de atribuir
-            if col_sums[best_val_col] > 0:
-                 identified_cols['valor'] = best_val_col
-            # else: Nenhuma coluna com soma positiva encontrada
-
-    # Retorna as colunas identificadas
-    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'),
-            identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
-
+            if col_sums[best_val_col] > 0: identified_cols['valor'] = best_val_col
+    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'), identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
 
 def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, col_cu=None, lim_a=80, lim_b=95):
     """Gera a curva ABC com cálculo de custo total ajustado para porcentagem e valor do CU."""
@@ -363,7 +266,7 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
 
         agg_config = {'descricao': ('descricao_str', 'first'), 'valor_original_sum': ('valor_original_num', 'sum')}
         if unit_col_present: agg_config['unidade'] = ('unidade_str', 'first')
-        if 'quantidade' in valid_optional: agg_config['quantidade'] = ('quantidade_num', 'sum')
+        if 'quantidade' in valid_optional: agg_config['quantidade'] = ('quantidade_num', 'sum') # Soma quantidade
         if 'custo_unitario' in valid_optional: agg_config['custo_unitario'] = ('custo_unitario_num', 'first')
 
         df_agg = df_work.groupby('codigo_str').agg(**agg_config).reset_index().rename(columns={'codigo_str': 'codigo'})
@@ -384,7 +287,7 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
             if df_agg.empty: st.error("Nenhum item com Custo Total calculado > 0."); return None, 0, None
             df_agg = df_agg.drop(columns=['valor_calc'])
         else:
-            st.warning("Usando o 'Valor Total' original para a curva ABC.")
+            # st.warning("Usando o 'Valor Total' original para a curva ABC.") # Aviso removido para ser mostrado depois
             df_agg['valor'] = df_agg['valor_original_sum']
             df_agg = df_agg[df_agg['valor'] > 0]
             if df_agg.empty: st.error("Nenhum item com Valor Total original > 0."); return None, 0, None
@@ -411,9 +314,6 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
         return df_final, v_total, df_curve_with_pos
     except KeyError as e: st.error(f"Erro: Coluna essencial não encontrada: {e}."); return None, 0, None
     except Exception as e: st.error(f"Erro inesperado gerar curva: {str(e)}"); return None, 0, None
-
-
-# --- Funções de Visualização e Download ---
 
 def criar_graficos_plotly(df_curva_with_pos, valor_total, limite_a, limite_b):
     """Cria gráficos interativos usando Plotly."""
@@ -487,39 +387,105 @@ with st.sidebar:
     lim_a = st.slider("Limite A (%)", 50, 95, st.session_state.limite_a, 1, key='lim_a_sld')
     lim_b_min = lim_a + 1; lim_b = st.slider("Limite B (%)", lim_b_min, 99, max(st.session_state.limite_b, lim_b_min), 1, key='lim_b_sld')
     st.session_state.limite_a, st.session_state.limite_b = lim_a, lim_b
-    st.markdown("---"); st.subheader("ℹ️ Sobre"); st.info("Gera Curvas ABC. v1.13"); st.markdown("---"); st.caption(f"© {datetime.now().year}")
+    st.markdown("---"); st.subheader("ℹ️ Sobre"); st.info("Gera Curvas ABC. v1.14"); st.markdown("---"); st.caption(f"© {datetime.now().year}")
 
 # Conteúdo Principal
-st.markdown('<div class="highlight">', unsafe_allow_html=True); st.markdown("#### Como usar:\n1. **Upload**.\n2. **Confirme Colunas**.\n3. Ajuste **Limites**.\n4. Clique **Gerar**.\n5. **Analise/Baixe**."); st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('<div class="highlight">', unsafe_allow_html=True); st.markdown("#### Como usar:\n1. **Upload**.\n2. **Confirme/Selecione Aba e Colunas**.\n3. Ajuste **Limites**.\n4. Clique **Gerar**.\n5. **Analise/Baixe**."); st.markdown('</div>', unsafe_allow_html=True)
 
 # Upload
 uploaded_file = st.file_uploader("📂 Selecione a planilha", type=["csv", "xlsx", "xls"], key="file_uploader")
 
 # Estado da Sessão
-default_state = {'df_processed': None,'col_codigo': None,'col_descricao': None,'col_valor': None,'col_unidade': None,'col_quantidade': None,'col_custo_unitario': None,'curva_gerada': False,'curva_abc': None,'valor_total': 0,'last_uploaded_filename': None, 'df_curve_with_pos': None}
+default_state = {
+    'excel_file_bytes': None, 'sheet_names': None, 'target_sheet_name': None, 'user_selected_sheet': None,
+    'file_analyzed': False, 'sheet_selected': False, 'df_processed': None,
+    'col_codigo': None,'col_descricao': None,'col_valor': None,'col_unidade': None,
+    'col_quantidade': None,'col_custo_unitario': None,
+    'curva_gerada': False,'curva_abc': None,'valor_total': 0,
+    'last_uploaded_filename': None, 'df_curve_with_pos': None
+}
 for k, v in default_state.items():
     if k not in st.session_state: st.session_state[k] = v
 
-# Processamento Arquivo
+# Processamento Arquivo e Seleção de Aba
 if uploaded_file:
+    # Se for um novo arquivo, reseta tudo
     if st.session_state.last_uploaded_filename != uploaded_file.name:
+        for k in default_state: st.session_state[k] = default_state[k] # Reset completo
         st.session_state.last_uploaded_filename = uploaded_file.name
-        for k in default_state: st.session_state[k] = default_state[k] # Reset
-        with st.spinner('Processando...'):
-            df_proc, delim = processar_arquivo(uploaded_file)
-            st.session_state.df_processed = df_proc
-            if df_proc is not None:
-                st.success(f"Arquivo '{uploaded_file.name}' carregado!")
-                with st.spinner('Identificando colunas...'):
-                     cols = identificar_colunas(df_proc)
-                     st.session_state.col_codigo, st.session_state.col_descricao, st.session_state.col_valor, \
-                     st.session_state.col_unidade, st.session_state.col_quantidade, st.session_state.col_custo_unitario = cols
-            else: st.error("Falha processamento."); st.session_state.last_uploaded_filename = None
+        st.session_state.excel_file_bytes = uploaded_file.getvalue() # Armazena conteúdo
+        st.session_state.file_analyzed = False # Marca para analisar
+        st.session_state.sheet_selected = False # Ainda não selecionou aba
+        st.session_state.df_processed = None # Limpa df processado
+        st.session_state.curva_gerada = False # Limpa resultados anteriores
 
-# Controles e Geração
+    # Analisa o arquivo se ainda não foi feito (só na primeira vez após upload)
+    if not st.session_state.file_analyzed:
+        file_name_lower = uploaded_file.name.lower()
+        is_excel = file_name_lower.endswith(('.xlsx', '.xls'))
+        st.session_state.is_excel = is_excel # Guarda se é excel
+
+        if is_excel:
+            with st.spinner("Analisando abas do Excel..."):
+                sheet_names, target_sheet = analyze_excel_sheets(st.session_state.excel_file_bytes)
+                if sheet_names:
+                    st.session_state.sheet_names = sheet_names
+                    st.session_state.target_sheet_name = target_sheet # Pode ser None
+                    if target_sheet is not None:
+                        st.session_state.sheet_selected = True # Auto-selecionou
+                        st.session_state.user_selected_sheet = target_sheet # Define como selecionada
+                else:
+                    st.error("Não foi possível ler as abas do arquivo Excel.")
+                    # Limpa estado para permitir novo upload
+                    st.session_state.last_uploaded_filename = None
+        else: # É CSV
+             st.session_state.sheet_selected = True # CSV não precisa selecionar aba
+
+        st.session_state.file_analyzed = True # Marca como analisado
+
+    # Se for Excel e nenhuma aba foi auto-detectada, pede para o usuário selecionar
+    if st.session_state.is_excel and st.session_state.target_sheet_name is None and not st.session_state.sheet_selected:
+        st.subheader("Selecionar Aba")
+        st.warning("Não foi possível encontrar automaticamente a aba 'Planilha Sintética'.")
+        selected_sheet = st.selectbox(
+            "Por favor, selecione a aba que contém a Planilha Sintética:",
+            options=st.session_state.sheet_names,
+            index=0, # Padrão para a primeira
+            key="user_selectbox_sheet"
+        )
+        if st.button("Confirmar Aba", key="confirm_sheet_btn"):
+            st.session_state.user_selected_sheet = selected_sheet
+            st.session_state.sheet_selected = True
+            st.rerun() # Roda novamente para carregar os dados da aba selecionada
+
+# Carrega dados e mostra controles SE aba foi selecionada (ou se for CSV)
+if st.session_state.sheet_selected and st.session_state.df_processed is None:
+     sheet_to_process = st.session_state.user_selected_sheet if st.session_state.is_excel else None
+     with st.spinner(f"Carregando dados da aba '{sheet_to_process}'..." if st.session_state.is_excel else "Carregando CSV..."):
+          df_proc = load_and_process_sheet(
+               st.session_state.excel_file_bytes,
+               sheet_to_process,
+               st.session_state.is_excel,
+               file_name=st.session_state.last_uploaded_filename
+          )
+          st.session_state.df_processed = df_proc
+          if df_proc is not None:
+               with st.spinner('Identificando colunas...'):
+                    cols = identificar_colunas(df_proc)
+                    st.session_state.col_codigo, st.session_state.col_descricao, st.session_state.col_valor, \
+                    st.session_state.col_unidade, st.session_state.col_quantidade, st.session_state.col_custo_unitario = cols
+          else:
+               st.error("Falha ao carregar ou processar a aba/arquivo selecionado.")
+               # Reseta para permitir nova tentativa ou upload
+               st.session_state.sheet_selected = False
+               st.session_state.file_analyzed = False
+               st.session_state.last_uploaded_filename = None
+
+
+# Exibe controles de coluna e botão gerar SE os dados foram processados
 if st.session_state.df_processed is not None:
     df = st.session_state.df_processed
-    with st.expander("🔍 Amostra Dados", expanded=False):
+    with st.expander("🔍 Amostra Dados Carregados", expanded=False):
         try: st.dataframe(df.head(10))
         except Exception as e: st.warning(f"Erro amostra: {e}")
 
@@ -538,7 +504,9 @@ if st.session_state.df_processed is not None:
     cols_ok = st.session_state.sel_cod and st.session_state.sel_desc and st.session_state.sel_val
     if not cols_ok: st.warning("Selecione colunas obrigatórias (*).")
     if cols_ok and not (st.session_state.sel_qtd and st.session_state.sel_cu):
-         st.info("Se 'Quantidade' e 'Custo Unitário' não forem selecionados, o 'Valor Total' original será usado.")
+         st.info("Se 'Quantidade' e 'Custo Unitário' não forem selecionados, o 'Valor Total' original será usado para itens não percentuais.")
+    elif cols_ok and (st.session_state.sel_qtd and st.session_state.sel_cu):
+         st.info("Itens '%': Custo Total usará regra do Custo Unit. Outros: Qtd*CU (truncado).")
 
 
     if st.button("🚀 Gerar Curva ABC", key="gen_btn", disabled=not cols_ok):
