@@ -189,47 +189,106 @@ def truncate(number, decimals=0):
 
 def identificar_colunas(df):
     """Identifica heuristicamente as colunas necessárias."""
-    identified_cols = {}; cols_lower_map = {str(col).lower().strip(): col for col in df.columns}; df_cols_list = list(df.columns)
-    exact_matches = {'codigo': ['código do serviço', 'código', 'codigo', 'cod.', 'item', 'ref'],'descricao': ['descrição do serviço', 'descrição', 'descricao', 'desc', 'especificação', 'serviço'],'valor': ['custo total', 'valor total', 'preço total', 'total', 'valor'],'unidade': ['unidade de medida', 'unid', 'unidade', 'und', 'um'],'quantidade': ['quantidade', 'quantidade total', 'quant', 'qtd', 'qtde'],'custo_unitario': ['custo unitário', 'preço unitário', 'valor unitário', 'custo unitario', 'preco unitario', 'valor unitario', 'unitário']}
+    # --- Início da Função (Indentação Nível 0) ---
+    identified_cols = {}
+    cols_lower_map = {str(col).lower().strip(): col for col in df.columns}
+    df_cols_list = list(df.columns)
+
+    exact_matches = {
+        'codigo': ['código do serviço', 'código', 'codigo', 'cod.', 'item', 'ref'],
+        'descricao': ['descrição do serviço', 'descrição', 'descricao', 'desc', 'especificação', 'serviço'],
+        'valor': ['custo total', 'valor total', 'preço total', 'total', 'valor'],
+        'unidade': ['unidade de medida', 'unid', 'unidade', 'und', 'um'],
+        'quantidade': ['quantidade', 'quantidade total', 'quant', 'qtd', 'qtde'],
+        'custo_unitario': ['custo unitário', 'preço unitário', 'valor unitário', 'custo unitario', 'preco unitario', 'valor unitario', 'unitário']
+    }
+
+    # 1. Identificação por nomes exatos
     for target, patterns in exact_matches.items():
-        if target in identified_cols: continue
+        # --- (Indentação Nível 1) ---
+        if target in identified_cols:
+            continue
         for pattern in patterns:
+            # --- (Indentação Nível 2) ---
             if pattern in cols_lower_map:
                 col_original = cols_lower_map[pattern]
                 if col_original not in identified_cols.values():
                     is_num_ok = True
                     if target in ['valor', 'custo_unitario', 'quantidade']:
-                         is_num_ok = False
-                         try: is_num_ok = pd.api.types.is_numeric_dtype(df[col_original]) or df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
-                         except Exception: pass
-                    if is_num_ok: identified_cols[target] = col_original; break
+                        is_num_ok = False
+                        try:
+                            is_num_ok = pd.api.types.is_numeric_dtype(df[col_original]) or \
+                                        df[col_original].dropna().astype(str).str.contains(r'[\d,.]').any()
+                        except Exception:
+                            pass
+                    if is_num_ok:
+                        identified_cols[target] = col_original
+                        break
+
+    # 2. Heurística para Quantidade após Unidade
     if 'quantidade' not in identified_cols and 'unidade' in identified_cols:
+        # --- (Indentação Nível 1) ---
         col_unidade_nome = identified_cols['unidade']
         try:
+            # --- (Indentação Nível 2) ---
             unidade_idx = df_cols_list.index(col_unidade_nome)
             if unidade_idx + 1 < len(df_cols_list):
                 col_seguinte = df_cols_list[unidade_idx + 1]
                 if col_seguinte not in identified_cols.values():
                     is_num_ok = False
-                    try: is_num_ok = pd.api.types.is_numeric_dtype(df[col_seguinte]) or df[col_seguinte].dropna().astype(str).str.contains(r'[\d,.]').any()
-                    except Exception: pass
-                    if is_num_ok: identified_cols['quantidade'] = col_seguinte
-        except ValueError: pass
+                    try:
+                        is_num_ok = pd.api.types.is_numeric_dtype(df[col_seguinte]) or \
+                                    df[col_seguinte].dropna().astype(str).str.contains(r'[\d,.]').any()
+                    except Exception:
+                        pass
+                    if is_num_ok:
+                        identified_cols['quantidade'] = col_seguinte
+        except ValueError:
+            pass
+
+    # 3. Fallback para Descrição
     available = [c for c in df.columns if c not in identified_cols.values()]
     if 'descricao' not in identified_cols and available:
-         try: identified_cols['descricao'] = max(available, key=lambda c: df[c].astype(str).str.len().mean())
-         except Exception: pass
+        # --- (Indentação Nível 1) ---
+        try:
+            # --- (Indentação Nível 2) ---
+            mean_lengths = {col: df[col].astype(str).str.len().mean() for col in available}
+            if mean_lengths:
+                identified_cols['descricao'] = max(mean_lengths, key=mean_lengths.get)
+        except Exception:
+            pass
+
+    # 4. Fallback para Valor (Re-indentado cuidadosamente com 4 espaços)
     available = [c for c in df.columns if c not in identified_cols.values()]
     if 'valor' not in identified_cols and available:
+        # --- (Indentação Nível 1) ---
         col_sums = {}
         for col in available:
-            try: vals = df[col].apply(limpar_valor); s = vals.sum(); c = vals.count(); l = len(df)
-                 if c > l * 0.1: col_sums[col] = s
-            except Exception: continue
+            # --- Início Bloco Try (Indentação Nível 2) ---
+            try:
+                # --- Código dentro do Try (Indentação Nível 3) ---
+                vals = df[col].apply(limpar_valor)
+                s = vals.sum()
+                c = vals.count()
+                l = len(df)
+                # Condição (Indentação Nível 3)
+                if c > l * 0.1:
+                    # Atribuição (Indentação Nível 4)
+                    col_sums[col] = s
+            # --- Início Bloco Except (Indentação Nível 2, alinhado com try) ---
+            except Exception:
+                # --- Código dentro do Except (Indentação Nível 3) ---
+                continue # Pula para próxima coluna
+            # --- Fim Bloco Except ---
+        # --- Código após o loop (Indentação Nível 2) ---
         if col_sums:
             best_val_col = max(col_sums, key=col_sums.get)
-            if col_sums[best_val_col] > 0: identified_cols['valor'] = best_val_col
-    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'), identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
+            if col_sums[best_val_col] > 0:
+                identified_cols['valor'] = best_val_col
+
+    # Return (Indentação Nível 0)
+    return (identified_cols.get('codigo'), identified_cols.get('descricao'), identified_cols.get('valor'),
+            identified_cols.get('unidade'), identified_cols.get('quantidade'), identified_cols.get('custo_unitario'))
 
 
 def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, col_cu=None, lim_a=80, lim_b=95):
@@ -239,13 +298,11 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
     optional = {'unidade': col_un, 'quantidade': col_qtd, 'custo_unitario': col_cu}
     cols_to_use = list(essential.values()) + [c for c in optional.values() if c and c in df.columns]
     valid_optional = {k: v for k, v in optional.items() if v and v in df.columns}
-    # Verifica se Qtd e CU estão disponíveis para cálculo (necessário para itens não-%)
-    can_calculate_non_percent = 'quantidade' in valid_optional and 'custo_unitario' in valid_optional
+    can_calculate_total = 'quantidade' in valid_optional and 'custo_unitario' in valid_optional
     unit_col_present = 'unidade' in valid_optional
 
     try:
         df_work = df[list(set(cols_to_use))].copy()
-        # Limpa todas as colunas necessárias primeiro
         df_work['valor_original_num'] = df_work[col_val].apply(limpar_valor)
         df_work['codigo_str'] = df_work[col_cod].astype(str).str.strip()
         df_work['descricao_str'] = df_work[col_desc].astype(str).str.strip()
@@ -253,75 +310,41 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
         if 'quantidade' in valid_optional: df_work['quantidade_num'] = df_work[valid_optional['quantidade']].apply(limpar_quantidade)
         if 'custo_unitario' in valid_optional: df_work['custo_unitario_num'] = df_work[valid_optional['custo_unitario']].apply(limpar_valor)
 
-        # Filtra antes de agrupar (baseado no valor original > 0)
         df_work = df_work[(df_work['valor_original_num'] > 0) & (df_work['codigo_str'] != '')]
         if df_work.empty: st.error("Nenhum item válido encontrado (valor original > 0)."); return None, 0, None
 
-        # Configuração da Agregação
         agg_config = {'descricao': ('descricao_str', 'first'), 'valor_original_sum': ('valor_original_num', 'sum')}
         if unit_col_present: agg_config['unidade'] = ('unidade_str', 'first')
-        if 'quantidade' in valid_optional: agg_config['quantidade'] = ('quantidade_num', 'sum') # Soma quantidade
+        if 'quantidade' in valid_optional: agg_config['quantidade'] = ('quantidade_num', 'sum')
         if 'custo_unitario' in valid_optional: agg_config['custo_unitario'] = ('custo_unitario_num', 'first')
 
         df_agg = df_work.groupby('codigo_str').agg(**agg_config).reset_index().rename(columns={'codigo_str': 'codigo'})
 
-        # *** AJUSTE FINAL: Define o 'valor' final para a curva ABC ***
-        calculated_value_used = False # Flag para saber se o cálculo Qtd*CU foi usado
         def get_final_value(row):
-            nonlocal calculated_value_used
             unit = str(row.get('unidade', '')).strip() if 'unidade' in df_agg.columns else ''
             valor_orig = row.get('valor_original_sum', 0.0)
             qtd = row.get('quantidade', 0)
             cu = row.get('custo_unitario', 0)
-
-            # Garante que qtd e cu sejam numéricos válidos para operações
             qtd_is_valid = isinstance(qtd, (int, float, np.number)) and pd.notna(qtd)
             cu_is_valid = isinstance(cu, (int, float, np.number)) and pd.notna(cu)
             qtd = float(qtd) if qtd_is_valid else 0.0
             cu = float(cu) if cu_is_valid else 0.0
-
             if unit == '%':
-                # Nova lógica para unidade '%'
-                if cu_is_valid and cu >= 500:
-                    # Se CU >= 500, Custo Total é o próprio Custo Unitário
-                    # Não truncamos aqui, assumimos que o CU já está correto
-                    return cu
-                elif cu_is_valid and qtd_is_valid: # Se CU < 500, requer QTD e CU válidos
-                    # Se CU < 500, Custo Total = Qtd * CU (truncado)
-                    calculated_value = qtd * cu
-                    calculated_value_used = True
-                    return truncate(calculated_value, 2)
-                else:
-                    # Se CU < 500 mas QTD ou CU inválidos, retorna 0 para evitar erro
-                    return 0.0
+                if cu_is_valid and cu >= 500: return cu
+                elif cu_is_valid and qtd_is_valid: return truncate(qtd * cu, 2)
+                else: return 0.0
             else:
-                # Lógica para unidades diferentes de '%'
-                if qtd_is_valid and cu_is_valid:
-                    # Tenta calcular Qtd * CU e truncar
-                    calculated_value = qtd * cu
-                    calculated_value_used = True
-                    return truncate(calculated_value, 2)
-                else:
-                    # Fallback para valor original se Qtd ou CU inválidos
-                    # st.warning(f"Item {row['codigo']}: Usando valor original (falha Qtd*CU).") # Opcional
-                    return valor_orig
-
-        # Aplica a lógica para criar a coluna 'valor' final
+                if qtd_is_valid and cu_is_valid: return truncate(qtd * cu, 2)
+                else: return valor_orig
         df_agg['valor'] = df_agg.apply(get_final_value, axis=1)
 
-        # Filtra linhas onde o valor final é zero ou negativo
         df_agg = df_agg[df_agg['valor'] > 0]
         if df_agg.empty: st.error("Nenhum item com valor final > 0."); return None, 0, None
+        if 'valor_original_sum' in df_agg.columns: df_agg = df_agg.drop(columns=['valor_original_sum'])
 
-        # Remove coluna temporária do valor original somado, se existir
-        if 'valor_original_sum' in df_agg.columns:
-            df_agg = df_agg.drop(columns=['valor_original_sum'])
-
-        # Recalcula v_total com base no 'valor' final
         v_total = df_agg['valor'].sum()
         if v_total <= 0: st.error("Valor total final é zero ou negativo."); return None, 0, None
 
-        # Continua com cálculos da curva ABC
         df_curve = df_agg.sort_values('valor', ascending=False).reset_index(drop=True)
         df_curve['percentual'] = (df_curve['valor'] / v_total * 100)
         df_curve['percentual_acumulado'] = df_curve['percentual'].cumsum()
@@ -329,7 +352,6 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
         df_curve['classificacao'] = df_curve['percentual_acumulado'].apply(lambda p: 'A' if p <= lim_a + 1e-9 else ('B' if p <= lim_b + 1e-9 else 'C'))
         df_curve['posicao'] = range(1, len(df_curve) + 1)
 
-        # Ordem das colunas internas (sem 'posicao')
         final_cols_internal = ['codigo', 'descricao']
         if 'unidade' in df_curve.columns: final_cols_internal.append('unidade')
         if 'quantidade' in df_curve.columns: final_cols_internal.append('quantidade')
@@ -341,7 +363,6 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
         return df_final, v_total, df_curve_with_pos
     except KeyError as e: st.error(f"Erro: Coluna essencial não encontrada: {e}."); return None, 0, None
     except Exception as e: st.error(f"Erro inesperado gerar curva: {str(e)}"); return None, 0, None
-
 
 # --- Funções de Visualização e Download --- (Mantidas como v1.14)
 def criar_graficos_plotly(df_curva_with_pos, valor_total, limite_a, limite_b):
@@ -407,7 +428,7 @@ def get_download_link(df_orig, filename, text, file_format='csv'):
         print(f"DEBUG: Erro download ({file_format}): {e}") # Opcional: log no console
 
 
-# --- Interface Streamlit ---
+# --- Interface Streamlit --- (Mantida como v1.14)
 
 # Sidebar
 with st.sidebar:
@@ -509,26 +530,12 @@ if st.session_state.df_processed is not None:
 
     cols_ok = st.session_state.sel_cod and st.session_state.sel_desc and st.session_state.sel_val
     if not cols_ok: st.warning("Selecione colunas obrigatórias (*).")
-    # *** AJUSTE: Remove avisos st.info sobre cálculo ***
-    # if cols_ok and not (st.session_state.sel_qtd and st.session_state.sel_cu):
-    #      st.info("Se 'Quantidade' e 'Custo Unitário' não forem selecionados, o 'Valor Total' original será usado.")
-    # elif cols_ok and (st.session_state.sel_qtd and st.session_state.sel_cu):
-    #      st.info("Itens '%': Custo Total usará regra do Custo Unit. Outros: Qtd*CU (truncado).")
-
+    # Avisos removidos
 
     if st.button("🚀 Gerar Curva ABC", key="gen_btn", disabled=not cols_ok):
         with st.spinner('Gerando...'):
-            res, v_tot, df_curve_with_pos = gerar_curva_abc(
-                df,
-                st.session_state.sel_cod, st.session_state.sel_desc, st.session_state.sel_val,
-                st.session_state.sel_un, st.session_state.sel_qtd, st.session_state.sel_cu,
-                st.session_state.limite_a, st.session_state.limite_b
-            )
-            if res is not None:
-                st.session_state.update({
-                    'curva_abc': res, 'valor_total': v_tot, 'curva_gerada': True,
-                    'df_curve_with_pos': df_curve_with_pos
-                })
+            res, v_tot, df_curve_with_pos = gerar_curva_abc(df, st.session_state.sel_cod, st.session_state.sel_desc, st.session_state.sel_val, st.session_state.sel_un, st.session_state.sel_qtd, st.session_state.sel_cu, st.session_state.limite_a, st.session_state.limite_b)
+            if res is not None: st.session_state.update({'curva_abc': res, 'valor_total': v_tot, 'curva_gerada': True, 'df_curve_with_pos': df_curve_with_pos})
             else: st.error("Falha ao gerar."); st.session_state.curva_gerada = False
 
 # Exibir Resultados
