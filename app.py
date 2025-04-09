@@ -27,8 +27,8 @@ try:
 except locale.Error:
     try:
         locale.setlocale(locale.LC_ALL, 'Portuguese_Brazil.1252') # Windows
-  #  except locale.Error:
-   #     st.warning("Não foi possível definir o locale pt_BR para formatação numérica automática. Usando formatação manual.")
+    except locale.Error:
+        st.warning("Não foi possível definir o locale pt_BR para formatação numérica automática. Usando formatação manual.")
         # A formatação manual será usada como fallback
 
 # Estilo CSS personalizado
