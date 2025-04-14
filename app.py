@@ -330,7 +330,7 @@ def gerar_curva_abc(df, col_cod, col_desc, col_val, col_un=None, col_qtd=None, c
             qtd = float(qtd) if qtd_is_valid else 0.0
             cu = float(cu) if cu_is_valid else 0.0
             if unit == '%':
-                if cu_is_valid and cu >= 500: return cu
+                if cu_is_valid and cu >= 1000: return cu
                 elif cu_is_valid and qtd_is_valid: return truncate(qtd * cu, 2)
                 else: return 0.0
             else:
